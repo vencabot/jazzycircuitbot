@@ -1,3 +1,3 @@
 ### Jazzy Circuit Bot
 
-Placeholder for the readme
+Placeholder for the readme :o)
