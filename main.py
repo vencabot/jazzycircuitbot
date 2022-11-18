@@ -1,10 +1,82 @@
+import dataclasses
 import datetime
+import json
+import typing
+import urllib.parse
+import urllib.request
 
 import src.startgg as startgg
 import src.streambrain as streambrain
 import src.twitch_chat as twitch_chat
 
 JAZZYCIRCUITBOT_CHANNELS_PATH = "jazzycircuitbot_channels.txt"
+
+@dataclasses.dataclass
+class TwitchStreamData:
+    stream_id: str
+    user_id: str
+    user_login: str
+    user_name: str
+    game_id: str
+    game_name: str
+    stream_type: str
+    title: str
+    viewer_count: int
+    # TO-DO: convert this to a datetime
+    started_at: str
+    language: str
+    thumbnail_url: str
+    tag_ids: str
+    is_mature: bool
+
+
+class TwitchInterface:
+    def __init__(self, access_token: str, client_id: str):
+        self._access_token = access_token
+        self._client_id = client_id
+
+    def get_streams(
+            self, user_ids: typing.List[str]=[],
+            user_logins: typing.List[str]=[],
+            game_ids: typing.List[str]=[],
+            stream_type: str=None, language: str=None,
+            max_results: int=None):
+        query_parameters = []
+        for user_id in user_ids:
+            query_parameters.append(("user_id", user_id))
+        for user_login in user_logins:
+            query_parameters.append(("user_login", user_login))
+        for game_id in game_ids:
+            query_parameters.append(("game_id", game_id))
+        if stream_type is not None:
+            query_parameters.append(("type", stream_type))
+        if language is not None:
+            query_parameters.append(("language", language))
+        if max_results is not None:
+            query_parameters.append(("first", max_results))
+        streams_data = self._make_request("streams", query_parameters)
+        streams = []
+        for stream_data in streams_data["data"]:
+            stream_data["stream_id"] = stream_data["id"]
+            stream_data["stream_type"] = stream_data["type"]
+            del stream_data["id"]
+            del stream_data["type"]
+            streams.append(TwitchStreamData(**stream_data))
+        return streams
+
+    def _make_request(
+            self, endpoint: str, query_parameters: typing.List[tuple]):
+        api_url = "https://api.twitch.tv/helix/"
+        encoded_parameters = urllib.parse.urlencode(query_parameters)
+        request_url = f"{api_url}{endpoint}?{encoded_parameters}"
+        request_headers = {
+                "Authorization": f"Bearer {self._access_token}",
+                "Client-Id": self._client_id}
+        twitch_request = urllib.request.Request(
+                request_url, None, request_headers)
+        with urllib.request.urlopen(twitch_request) as twitch_response:
+            response_data = json.load(twitch_response)
+        return response_data
 
 
 class DemoCommandHandler(streambrain.Handler):
@@ -145,6 +217,11 @@ with open("../startgg_access_token.txt") as startgg_access_token_file:
     startgg_access_token = startgg_access_token_file.read().strip()
 startgg_interface = startgg.StartGGInterface(startgg_access_token)
 
+# Set up Twitch interface
+with open("../twitch_client_id.txt") as twitch_client_id_file:
+    twitch_client_id = twitch_client_id_file.read().strip()
+twitch_interface = TwitchInterface(twitch_access_token, twitch_client_id)
+
 # Set up other interfaces
 read_twitch_chat = twitch_chat_direct_interface.read
 send_twitch_privmsg = twitch_chat_direct_interface.send
@@ -168,8 +245,9 @@ demo_brain = streambrain.StreamBrain()
 demo_brain.activate_handler(demo_command_handler)
 demo_brain.activate_handler(leave_if_not_modded_handler)
 demo_brain.activate_handler(ping_handler)
-demo_brain.start_listening(twitch_chat_listener)
 
-#send_twitch_privmsg("vencabot", "hay guys :3 beep boop")
+# Main loop
+#print(twitch_interface.get_streams(user_logins=["vencabot"]))
+demo_brain.start_listening(twitch_chat_listener)
 input()
 demo_brain.stop()
