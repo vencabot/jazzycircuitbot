@@ -202,10 +202,15 @@ class PingHandler(streambrain.Handler):
         self._pong(streambrain_event.message)
 
 
+# Load credentials
+with open("credentials.json") as credentials_file:
+    credentials = json.loads(credentials_file.read())
+twitch_access_token = credentials["twitch_access_token"]
+startgg_access_token = credentials["startgg_access_token"]
+twitch_client_id = credentials["twitch_client_id"]
+
 # Set up direct_twitch_chat_interface
 twitch_chat_direct_interface = twitch_chat.DirectInterface()
-with open("../twitch_access_token.txt") as twitch_access_token_file:
-    twitch_access_token = twitch_access_token_file.read().strip()
 twitch_chat_direct_interface.setup("botvencabot", twitch_access_token)
 with open(JAZZYCIRCUITBOT_CHANNELS_PATH) as channels_file:
     joined_channels = channels_file.read().split()
@@ -213,13 +218,9 @@ for channel in joined_channels:
     twitch_chat_direct_interface.join_channel(channel)
 
 # Set up startgg_interface
-with open("../startgg_access_token.txt") as startgg_access_token_file:
-    startgg_access_token = startgg_access_token_file.read().strip()
 startgg_interface = startgg.StartGGInterface(startgg_access_token)
 
 # Set up Twitch interface
-with open("../twitch_client_id.txt") as twitch_client_id_file:
-    twitch_client_id = twitch_client_id_file.read().strip()
 twitch_interface = TwitchInterface(twitch_access_token, twitch_client_id)
 
 # Set up other interfaces
