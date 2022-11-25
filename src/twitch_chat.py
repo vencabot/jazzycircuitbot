@@ -21,6 +21,10 @@ class CapabilityRequestDeniedError(Exception):
     pass
 
 
+class TwitchChatDisconnectedError(Exception):
+    pass
+
+
 class TwitchIRCMessage:
     TWITCH_IRC_RE = re.compile(
             r"^(@(?P<tags>.*?) )?"
@@ -48,10 +52,11 @@ class TwitchIRCMessage:
 class DirectInterface:
     def __init__(self):
         self._connection = None
+        self._is_setting_up = False
 
     # Create a method for reporting what Twitch channels we're currently in.
 
-    def _connect(self, timeout_seconds: int = 5) -> socket.socket:
+    def _connect(self, timeout_seconds: int = 150) -> socket.socket:
         twitch_address = (TWITCH_SERVER_HOST, TWITCH_SERVER_PORT)
         self._connection = socket.create_connection(twitch_address)
         self._connection.settimeout(timeout_seconds)
@@ -83,61 +88,111 @@ class DirectInterface:
     def setup(
             self, username: str, access_token: str,
             timeout_seconds: int = 5) -> None:
+        if self._is_setting_up:
+            # diagnostic
+            print(
+                    "TwitchChatDirectInterface 'setup' was called while it "
+                    "was already being set up.")
+            return
+        self._is_setting_up = True
         identifier = f"Chatbot '{username}'"
         # diagnostic
-        print(f"{identifier} connecting.")
-        self._connect(timeout_seconds)
-        # diagnostic
-        print(f"{identifier} authenticating.")
-        self._send_authentication(username, access_token)
-        self._verify_authentication()
-        # diagnostic
-        print(f"{identifier} requesting IRC capabilities.")
-        self._request_capability("twitch.tv/membership")
-        self._request_capability("twitch.tv/tags")
-        self._request_capability("twitch.tv/commands")
+        try:
+            print(f"{identifier} connecting.")
+            self._connect(timeout_seconds)
+            # diagnostic
+            print(f"{identifier} authenticating.")
+            self._send_authentication(username, access_token)
+            self._verify_authentication()
+            # diagnostic
+            print(f"{identifier} requesting IRC capabilities.")
+            self._request_capability("twitch.tv/membership")
+            self._request_capability("twitch.tv/tags")
+            self._request_capability("twitch.tv/commands")
+        except (ConnectionResetError, socket.gaierror):
+            self._is_setting_up = False
+            raise TwitchChatDisconnectedError()
+        except OSError as e:
+            if e.errno == 10065:
+                # a socket operation was attempted to an unreachable host
+                self._is_setting_up = False
+                raise TwitchChatDisconnectedError()
+            else:
+                print(e.errno)
+                raise
         # We should read a few messages to verify successful set-up.
         # diagnostic
         print(f"{identifier} finished setting up.")
+        self._is_setting_up = False
 
     def join_channel(self, channel: str) -> None:
         diag_str = f"{self} joining channel '{channel}'."
         # diagnostic
         print(diag_str)
-        self._connection.send(f"JOIN #{channel}\r\n".encode())
+        try:
+            self._connection.send(f"JOIN #{channel}\r\n".encode())
+        except ConnectionResetError:
+            raise TwitchChatDisconnectedError()
        # Should we read a message to see if it was a success?
 
     def part_channel(self, channel:str) -> None:
         diag_str = f"{self} parting channel '{channel}'."
         # diagnostic
         print(diag_str)
-        self._connection.send(f"PART #{channel}\r\n".encode())
+        try:
+            self._connection.send(f"PART #{channel}\r\n".encode())
+        except ConnectionResetError:
+            raise TwitchChatDisconnectedError()
  
     def read(self) -> List[TwitchIRCMessage]:
         recv_str = ""
         while True:
             try:
                 recv_str += self._connection.recv(1024).decode()
+            except ConnectionResetError:
+                raise TwitchChatDisconnectedError()
             except UnicodeDecodeError:
                 # DIAGNOSTIC
                 print(
                         "Caught UnicodeDecodeError. I think this happens "
                         "when people do ASCII art stuff. If you see this "
                         "error, investigate it more.")
-            if recv_str.endswith("\r\n") or recv_str == "":
+            if recv_str.endswith("\r\n"):
                 break
         # diagnostic
         print(f"read got: {recv_str}")
+        if recv_str == "":
+            # If 'read' returns nothing, then the remote server closed the
+            # connection.
+            raise TwitchChatDisconnectedError()
         server_messages = [line for line in recv_str.split("\r\n") if line]
         return [TwitchIRCMessage(message) for message in server_messages]
 
     def send(self, channel: str, message: str) -> None:
-        self._connection.send(f"PRIVMSG #{channel} :{message}\r\n".encode())
+        send_data = f"PRIVMSG #{channel} :{message}\r\n".encode()
+        try:
+            bytes_sent = self._connection.send(send_data)
+        except ConnectionResetError:
+            raise TwitchChatDisconnectedError()
+        print(bytes_sent)
+        if bytes_sent == 0:
+            raise TwitchChatDisconnectedError()
 
     def pong(self, parameters):
         message = f"PONG :{' '.join(parameters)}\r\n"
         # diagnostic
-        self._connection.send(message.encode())
+        try:
+            self._connection.send(message.encode())
+        except ConnectionResetError:
+            raise TwitchChatDisconnectedError()
+        print(f"sent: {message}")
+
+    def ping(self):
+        message = "PING :tmi.twitch.tv\r\n"
+        try:
+            self._connection.send(message.encode())
+        except ConnectionResetError:
+            raise TwitchChatDisconnectedError()
         print(f"sent: {message}")
 
 
@@ -201,6 +256,10 @@ class PingEvent(Event):
     def __init__(self, ping_message_parameters: List[str]):
         super().__init__(ping_message_parameters)
 
+class PongEvent(Event):
+    def __init__(self, pong_message_parameters: List[str]):
+        super().__init__(pong_message_parameters)
+
 class JoinEvent(Event):
     def __init__(self, twitch_irc_message):
         super().__init__(twitch_irc_message)
@@ -211,14 +270,32 @@ class UserstateEvent(Event):
 
 class DirectInterfaceListener(Listener):
     def __init__(
-            self, twitch_chat_read: callable, sleep_sec: int = 0) -> None:
+            self, twitch_chat_read: callable, twitch_chat_ping: callable,
+            twitch_chat_reconnect: callable, sleep_sec: int = 0) -> None:
         super().__init__(sleep_sec)
         self._twitch_chat_read = twitch_chat_read
+        self._twitch_chat_ping = twitch_chat_ping
+        self._twitch_chat_reconnect = twitch_chat_reconnect
+        self._waiting_for_pong = False
 
     def listen(self) -> List[Event]:
         try:
             new_messages = self._twitch_chat_read()
         except socket.timeout:
+            print("diag got timeout")
+            if self._waiting_for_pong:
+                # We timed out while waiting for our pong.
+                self._waiting_for_pong = False
+                self._twitch_chat_reconnect()
+            else:
+                try:
+                    self._twitch_chat_ping()
+                    self._waiting_for_pong = True
+                except TwitchChatDisconnectedError:
+                    self._twitch_chat_reconnect()
+            return []
+        except TwitchChatDisconnectedError:
+            self._twitch_chat_reconnect()
             return []
         events = []
         for irc_message in new_messages:
@@ -228,6 +305,9 @@ class DirectInterfaceListener(Listener):
                 events.append(event)
             elif irc_message.command == "PING":
                 events.append(PingEvent(irc_message.parameters))
+            elif irc_message.command == "PONG":
+                self._waiting_for_pong = False
+                events.append(PongEvent(irc_message.parameters))
             elif irc_message.command == "JOIN":
                 events.append(JoinEvent(irc_message))
             elif irc_message.command == "USERSTATE":
