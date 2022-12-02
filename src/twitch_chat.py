@@ -67,19 +67,23 @@ class DirectInterface:
         self._connection.send(f"NICK {username}\r\n".encode())
 
     def _verify_authentication(self) -> None:
+        # We don't use this method any more (?).
+        # This is done in the Listener.
         try:
             response_messages = self.read()
         except socket.timeout:
             # diagnostic
             print("Twitch IRC server did not respond to authentication.")
+            self._is_setting_up = False
             raise
         first_command = response_messages[0].command
-        first_parameters = response_messages[0].parameters
+        first_params = response_messages[0].parameters
         if (
                 first_command == "NOTICE"
-                and first_parameters == "Login authentication failed"):
+                and first_params == ["*", "Login authentication failed"]):
             error_message = (
                     "Twitch IRC server did not accept oauth access token.")
+            self._is_setting_up = False
             raise LoginAuthenticationFailedError(error_message)
 
     def _request_capability(self, capability_name: str) -> None:
@@ -103,19 +107,22 @@ class DirectInterface:
             # diagnostic
             print(f"{identifier} authenticating.")
             self._send_authentication(username, access_token)
-            self._verify_authentication()
+            # We will now verify authentication through the Listener (?)
+            #self._verify_authentication()
             # diagnostic
             print(f"{identifier} requesting IRC capabilities.")
             self._request_capability("twitch.tv/membership")
             self._request_capability("twitch.tv/tags")
             self._request_capability("twitch.tv/commands")
-        except (ConnectionResetError, socket.gaierror):
+        except (ConnectionResetError, socket.gaierror) as e:
             self._is_setting_up = False
+            print("Excepted error: ", e)
             raise TwitchChatDisconnectedError()
         except OSError as e:
             if e.errno == 10065:
                 # a socket operation was attempted to an unreachable host
                 self._is_setting_up = False
+                print("Excepted error: OSError 10065")
                 raise TwitchChatDisconnectedError()
             else:
                 print(e.errno)
@@ -149,7 +156,11 @@ class DirectInterface:
         while True:
             try:
                 recv_str += self._connection.recv(1024).decode()
-            except ConnectionResetError:
+            except ConnectionResetError as e:
+                print("Excepted error: ", e)
+                raise TwitchChatDisconnectedError()
+            except ConnectionAbortedError as e:
+                print("Excepted error: ", e)
                 raise TwitchChatDisconnectedError()
             except UnicodeDecodeError:
                 # DIAGNOSTIC
@@ -312,6 +323,11 @@ class DirectInterfaceListener(Listener):
                 events.append(JoinEvent(irc_message))
             elif irc_message.command == "USERSTATE":
                 events.append(UserstateEvent(irc_message))
+            if irc_message.command == "NOTICE":
+                if irc_message.parameters == (
+                        ["*", "Login authentication failed"]):
+                    print("Login authenticationed failed! Boooo! T_T")
+                    self._twitch_chat_reconnect(True)
         return events
 
 

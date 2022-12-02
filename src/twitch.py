@@ -1,7 +1,13 @@
 import dataclasses
+import json
 import typing
 import urllib.parse
 import urllib.request
+
+
+class InvalidRefreshTokenError(Exception):
+    pass
+
 
 @dataclasses.dataclass
 class TwitchStreamData:
@@ -69,3 +75,20 @@ class TwitchInterface:
         with urllib.request.urlopen(twitch_request) as twitch_response:
             response_data = json.load(twitch_response)
         return response_data
+
+
+def get_refreshed_access_token(
+        refresh_token: str, client_id: str, client_secret: str) -> str:
+    refresh_url = "https://id.twitch.tv/oauth2/token"
+    refresh_parameters = {
+            "client_id": client_id, "client_secret": client_secret,
+            "grant_type": "refresh_token", "refresh_token": refresh_token}
+    refresh_parameters_encoded = urllib.parse.urlencode(refresh_parameters)
+    refresh_data = bytes(refresh_parameters_encoded, "ASCII")
+    refresh_request = urllib.request.Request(refresh_url, refresh_data)
+    with urllib.request.urlopen(refresh_request) as refresh_response:
+        response_data = json.load(refresh_response)
+    if "error" in response_data:
+        if response_data["message"] == "Invalid refresh token":
+            raise InvalidRefreshTokenError(refresh_token)
+    return response_data
