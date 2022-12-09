@@ -1,5 +1,7 @@
 import datetime
 import json
+import random
+import threading
 import time
 import typing
 
@@ -9,8 +11,106 @@ import src.streambrain as streambrain
 import src.twitch as twitch
 import src.twitch_chat as twitch_chat
 
-JAZZYCIRCUITBOT_CHANNELS_PATH = "jazzycircuitbot_channels.txt"
+CURRENT_CHANNELS_PATH = "current_channels.txt"
+EVENT_PROMO_OPTOUTS_PATH = "event_promo_optouts.txt"
 
+
+class Routine:
+    def __init__(self, interval_ticks: int, delay_ticks: int=0):
+        self._interval_ticks = interval_ticks
+        self._delay_ticks = delay_ticks
+        self._remaining_ticks = delay_ticks
+
+    def run(self):
+        pass
+
+    def increment(self, increment_ticks: int):
+        if self._remaining_ticks <= 0:
+            self.run()
+            self._remaining_ticks = (
+                    self._interval_ticks + self._remaining_ticks)
+        self._remaining_ticks -= increment_ticks
+
+
+class Schedule:
+    def __init__(self):
+        self.routines = []
+        self._incrementing_forever = False
+
+    def increment(self, increment_ticks: int):
+        for routine in self.routines:
+            routine.increment(increment_ticks)
+
+    def increment_loop(self, sleep_sec: int, tick_sec_ratio: int=1):
+        self._incrementing_forever = True
+        while self._incrementing_forever:
+            self.increment(sleep_sec * tick_sec_ratio)
+            time.sleep(sleep_sec)
+
+    def stop(self):
+        self._incrementing_forever = False
+
+
+class JazzyEventPromoRoutine(Routine):
+    def __init__(
+            self, startgg_interface: startgg.StartGGInterface,
+            twitch_chat_send: callable, interval_sec: int,
+            delay_sec: int=0):
+        self._startgg_interface = startgg_interface
+        self._twitch_chat_send = twitch_chat_send
+        self._plugged_event_ids = []
+        super().__init__(interval_sec, delay_sec)
+
+    def run(self):
+        # This code is hideous and I'm sorry. I'm gonna refactor it.
+        with open(CURRENT_CHANNELS_PATH) as current_channels_file:
+            current_channels = current_channels_file.read().split()
+        with open(EVENT_PROMO_OPTOUTS_PATH) as event_promo_optouts_file:
+            event_promo_optouts = event_promo_optouts_file.read().split()
+        events = startgg.get_events(self._startgg_interface)
+        now = datetime.datetime.now()
+        max_datetime = now + datetime.timedelta(days=45)
+        upcoming_events = {}
+        for event in events:
+            if (
+                    event["startAt"] > now.timestamp()
+                    and event["startAt"] < max_datetime.timestamp()):
+                upcoming_events[event["id"]] = event
+        imminent_events = upcoming_events.copy()
+        for event_id in self._plugged_event_ids:
+            try:
+                del imminent_events[event_id]
+            except KeyError:
+                pass
+        if not imminent_events:
+            imminent_events = upcoming_events
+            self._plugged_event_ids = []
+        random_event_id = random.choice(list(imminent_events.keys()))
+        plug_event = imminent_events[random_event_id]
+        tournament_name = plug_event["tournament"]["name"]
+        tournament_city = plug_event["tournament"]["city"]
+        tournament_state = plug_event["tournament"]["addrState"]
+        event_ts = plug_event["startAt"]
+        tournament_datetime = datetime.datetime.fromtimestamp(event_ts)
+        tournament_day = tournament_datetime.day
+        if 11 <= tournament_day <= 13:
+            day_suffix = "th"
+        else:
+            day_suffix_map = {1: "st", 2: "nd", 3: "rd"}
+            day_suffix = day_suffix_map.get(tournament_day % 10, "th")
+        tournament_date = (
+                f"{tournament_datetime.strftime('%a, %b ')} "
+                f"{tournament_day}{day_suffix}")
+        tournament_url = f"start.gg/{plug_event['tournament']['slug']}"
+        for channel_name in current_channels:
+            if channel_name not in event_promo_optouts:
+                self._twitch_chat_send(
+                    channel_name,
+                    f"Don't miss \"{tournament_name}\" in "
+                    f"{tournament_city}, {tournament_state} on "
+                    f"{tournament_date}! Learn more at {tournament_url}.")
+        self._plugged_event_ids.append(random_event_id)
+ 
 
 class CredentialsWriter:
     def __init__(self, credentials_path: str) -> None:
@@ -70,7 +170,7 @@ class TwitchChatReconnector:
                 continue
             else:
                 break
-        with open(JAZZYCIRCUITBOT_CHANNELS_PATH) as channels_file:
+        with open(CURRENT_CHANNELS_PATH) as channels_file:
             joined_channels = channels_file.read().split()
         for channel in joined_channels:
             self._twitch_chat_join(channel)
@@ -121,7 +221,7 @@ join_twitch_channel = twitch_chat_interface.join_channel
 part_twitch_channel = twitch_chat_interface.part_channel
 send_twitch_pong = twitch_chat_interface.pong
 send_twitch_ping = twitch_chat_interface.ping
-with open(JAZZYCIRCUITBOT_CHANNELS_PATH) as channels_file:
+with open(CURRENT_CHANNELS_PATH) as channels_file:
     joined_channels = channels_file.read().split()
 twitch_chat_reconnector = TwitchChatReconnector(
         twitch_username, twitch_access_token, twitch_refresh_token,
@@ -169,5 +269,13 @@ jazzycircuitbot_brain.start_listening(twitch_chat_listener)
 #twitch_chat_interface.send("vencabot", "o shit lol")
 #input()
 #twitch_chat_interface.send("vencabot", "thisll never get sent lol")
+routine_schedule = Schedule()
+promo_routine = JazzyEventPromoRoutine(
+        startgg_interface, send_twitch_privmsg, 5)
+routine_schedule.routines.append(promo_routine)
+schedule_thread = threading.Thread(
+        target=routine_schedule.increment_loop, args=(1,))
+schedule_thread.start()
 input()
 jazzycircuitbot_brain.stop()
+routine_schedule.stop()

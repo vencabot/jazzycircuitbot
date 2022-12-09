@@ -37,6 +37,15 @@ class StartGGInterface:
                             name 
                             startAt 
                             numEntrants
+                            slug
+                            tournament {
+                                id
+                                name
+                                city
+                                addrState
+                                countryCode
+                                slug
+                            }
                         }
                     }
                 }
