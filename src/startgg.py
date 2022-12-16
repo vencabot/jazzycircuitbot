@@ -25,6 +25,7 @@ class StartGGInterface:
             return body
 
     def get_league_events(self):
+        # bug: this only fetches the first 500 events
         return self.get_query('''
             query LeagueQuery {
                 league(slug: "the-jazzy-circuit-4"){
@@ -51,6 +52,44 @@ class StartGGInterface:
                 }
             }
             ''')
+        
+    def get_league_standings(self):
+        standings = []
+        more_pages = True
+        current_page = 1
+        while more_pages:
+            query_response = self.get_query("""
+                query LeagueStandings {
+                    league(slug: "the-jazzy-circuit-4") {
+                        id
+                        name
+                        standings (query: {
+                            page: """ + str(current_page) + """,
+                            perPage: 500
+                        }) {
+                            pageInfo {
+                                totalPages
+                                total
+                            }
+                            nodes {
+                                id
+                                placement
+                                totalPoints
+                                player {
+                                    id
+                                    gamerTag
+                                }
+                            }
+                        }
+                    }
+                }
+                """)
+            standings_data = query_response["data"]["league"]["standings"]
+            standings.extend(standings_data["nodes"])
+            total_pages = standings_data["pageInfo"]["totalPages"]
+            if current_page == total_pages:
+                more_pages = False
+        return standings
 
 # Kenny's old code.        
 #def get_events(

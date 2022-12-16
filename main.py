@@ -54,9 +54,11 @@ class Schedule:
 class JazzyEventPromoRoutine(Routine):
     def __init__(
             self, startgg_interface: startgg.StartGGInterface,
+            twitch_interface: twitch.TwitchInterface,
             twitch_chat_send: callable, interval_sec: int,
             delay_sec: int=0):
         self._startgg_interface = startgg_interface
+        self._twitch_interface = twitch_interface
         self._twitch_chat_send = twitch_chat_send
         self._plugged_event_ids = []
         super().__init__(interval_sec, delay_sec)
@@ -66,7 +68,7 @@ class JazzyEventPromoRoutine(Routine):
         with open(CURRENT_CHANNELS_PATH) as current_channels_file:
             current_channels = current_channels_file.read().split()
         with open(EVENT_PROMO_OPTOUTS_PATH) as event_promo_optouts_file:
-            event_promo_optouts = event_promo_optouts_file.read().split()
+            optouts = event_promo_optouts_file.read().split()
         events = startgg.get_events(self._startgg_interface)
         now = datetime.datetime.now()
         max_datetime = now + datetime.timedelta(days=45)
@@ -102,13 +104,15 @@ class JazzyEventPromoRoutine(Routine):
                 f"{tournament_datetime.strftime('%a, %b ')} "
                 f"{tournament_day}{day_suffix}")
         tournament_url = f"start.gg/{plug_event['tournament']['slug']}"
-        for channel_name in current_channels:
-            if channel_name not in event_promo_optouts:
-                self._twitch_chat_send(
-                    channel_name,
-                    f"Don't miss \"{tournament_name}\" in "
-                    f"{tournament_city}, {tournament_state} on "
-                    f"{tournament_date}! Learn more at {tournament_url}.")
+        promo_channels = [x for x in current_channels if x not in optouts]
+        live_jazzybot_streams = self._twitch_interface.get_streams(
+                user_logins=promo_channels)
+        for stream in live_jazzybot_streams:
+            self._twitch_chat_send(
+                stream.user_login,
+                f"Don't miss \"{tournament_name}\" in "
+                f"{tournament_city}, {tournament_state} on "
+                f"{tournament_date}! Learn more at {tournament_url}.")
         self._plugged_event_ids.append(random_event_id)
  
 
@@ -243,9 +247,11 @@ twitch_chat_listener = twitch_chat.DirectInterfaceListener(
 # Set up handlers
 twitch_chat_command_handler = handlers.TwitchChatCommandHandler(
         send_twitch_privmsg, join_twitch_channel, part_twitch_channel,
-        joined_channels, startgg_interface)
+        joined_channels, CURRENT_CHANNELS_PATH, EVENT_PROMO_OPTOUTS_PATH,
+        startgg_interface)
 leave_if_not_modded_handler = handlers.LeaveIfNotModdedHandler(
-        send_twitch_privmsg, part_twitch_channel, joined_channels)
+        send_twitch_privmsg, part_twitch_channel, joined_channels,
+        CURRENT_CHANNELS_PATH)
 ping_handler = handlers.PingHandler(send_twitch_pong)
 
 # Create StreamBrain
@@ -271,7 +277,7 @@ jazzycircuitbot_brain.start_listening(twitch_chat_listener)
 #twitch_chat_interface.send("vencabot", "thisll never get sent lol")
 routine_schedule = Schedule()
 promo_routine = JazzyEventPromoRoutine(
-        startgg_interface, send_twitch_privmsg, 5)
+        startgg_interface, twitch_interface, send_twitch_privmsg, 1800)
 routine_schedule.routines.append(promo_routine)
 schedule_thread = threading.Thread(
         target=routine_schedule.increment_loop, args=(1,))

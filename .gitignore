@@ -1,3 +1,4 @@
 # python binary file
 *.pyc
 credentials.json
+current_channels.txt
