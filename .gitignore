@@ -2,3 +2,4 @@
 *.pyc
 credentials.json
 current_channels.txt
+event_promo_optouts.txt
