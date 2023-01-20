@@ -9,6 +9,10 @@ class InvalidRefreshTokenError(Exception):
     pass
 
 
+class InvalidAccessTokenError(Exception):
+    pass
+
+
 @dataclasses.dataclass
 class TwitchStreamData:
     stream_id: str
@@ -24,13 +28,15 @@ class TwitchStreamData:
     started_at: str
     language: str
     thumbnail_url: str
+    tags: str
     tag_ids: str
     is_mature: bool
 
 
 class TwitchInterface:
-    def __init__(self, access_token: str, client_id: str):
-        self._access_token = access_token
+    def __init__(
+            self, access_token_getter: callable, client_id: str):
+        self._get_access_token = access_token_getter
         self._client_id = client_id
 
     def get_streams(
@@ -67,28 +73,56 @@ class TwitchInterface:
         api_url = "https://api.twitch.tv/helix/"
         encoded_parameters = urllib.parse.urlencode(query_parameters)
         request_url = f"{api_url}{endpoint}?{encoded_parameters}"
+        access_token = self._get_access_token()
         request_headers = {
-                "Authorization": f"Bearer {self._access_token}",
+                "Authorization": f"Bearer {access_token}",
                 "Client-Id": self._client_id}
         twitch_request = urllib.request.Request(
                 request_url, None, request_headers)
-        with urllib.request.urlopen(twitch_request) as twitch_response:
-            response_data = json.load(twitch_response)
+        try:
+            with urllib.request.urlopen(twitch_request) as twitch_response:
+                response_data = json.load(twitch_response)
+        except urllib.error.HTTPError as e:
+            if e.code == 401:
+                raise InvalidAccessTokenError(access_token)
+            raise
         return response_data
 
 
-def get_refreshed_access_token(
-        refresh_token: str, client_id: str, client_secret: str) -> str:
-    refresh_url = "https://id.twitch.tv/oauth2/token"
-    refresh_parameters = {
-            "client_id": client_id, "client_secret": client_secret,
-            "grant_type": "refresh_token", "refresh_token": refresh_token}
-    refresh_parameters_encoded = urllib.parse.urlencode(refresh_parameters)
-    refresh_data = bytes(refresh_parameters_encoded, "ASCII")
-    refresh_request = urllib.request.Request(refresh_url, refresh_data)
-    with urllib.request.urlopen(refresh_request) as refresh_response:
-        response_data = json.load(refresh_response)
-    if "error" in response_data:
-        if response_data["message"] == "Invalid refresh token":
-            raise InvalidRefreshTokenError(refresh_token)
-    return response_data
+class TwitchCredentialsManager:
+    REFRESH_URL = "https://id.twitch.tv/oauth2/token"
+
+    def __init__(
+            self, client_id: str, client_secret: str, refresh_token: str,
+            access_token: str=None) -> None:
+        self.client_id = client_id
+        self._client_secret = client_secret
+        self._refresh_token = refresh_token
+        if access_token:
+            self._access_token = access_token
+        else:
+            self.refresh_access_token()
+        self._refreshing = False
+
+    def get_access_token(self) -> str:
+        return self._access_token
+
+    def refresh_access_token(self) -> None:
+        # THIS IS A RACE CONDITION BUG. FIX THIS.
+        refresh_parameters = {
+                "client_id": self.client_id,
+                "client_secret": self._client_secret,
+                "grant_type": "refresh_token",
+                "refresh_token": self._refresh_token}
+        encoded_parameters = urllib.parse.urlencode(refresh_parameters)
+        refresh_data = bytes(encoded_parameters, "ASCII")
+        request = urllib.request.Request(self.REFRESH_URL, refresh_data)
+        # diagnostic
+        print("Refreshing access token.")
+        with urllib.request.urlopen(request) as refresh_response:
+            response_data = json.load(refresh_response)
+        if "error" in response_data:
+            if response_data["message"] == "Invalid refresh token":
+                raise InvalidRefreshTokenError(refresh_token)
+        self._access_token = response_data["access_token"]
+        self._refresh_token = response_data["refresh_token"]

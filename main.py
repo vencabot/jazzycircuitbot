@@ -14,7 +14,6 @@ import src.twitch_chat as twitch_chat
 CURRENT_CHANNELS_PATH = "current_channels.txt"
 EVENT_PROMO_OPTOUTS_PATH = "event_promo_optouts.txt"
 
-
 class Routine:
     def __init__(self, interval_ticks: int, delay_ticks: int=0):
         self._interval_ticks = interval_ticks
@@ -55,11 +54,13 @@ class JazzyEventPromoRoutine(Routine):
     def __init__(
             self, startgg_interface: startgg.StartGGInterface,
             twitch_interface: twitch.TwitchInterface,
-            twitch_chat_send: callable, interval_sec: int,
+            twitch_chat_send: callable,
+            refresh_twitch_access_token: callable, interval_sec: int,
             delay_sec: int=0):
         self._startgg_interface = startgg_interface
         self._twitch_interface = twitch_interface
         self._twitch_chat_send = twitch_chat_send
+        self._refresh_twitch_access_token = refresh_twitch_access_token
         self._plugged_event_ids = []
         super().__init__(interval_sec, delay_sec)
 
@@ -69,6 +70,8 @@ class JazzyEventPromoRoutine(Routine):
             current_channels = current_channels_file.read().split()
         with open(EVENT_PROMO_OPTOUTS_PATH) as event_promo_optouts_file:
             optouts = event_promo_optouts_file.read().split()
+        # diagnostic
+        print("Getting startgg events.")
         events = startgg.get_events(self._startgg_interface)
         now = datetime.datetime.now()
         max_datetime = now + datetime.timedelta(days=45)
@@ -105,8 +108,18 @@ class JazzyEventPromoRoutine(Routine):
                 f"{tournament_day}{day_suffix}")
         tournament_url = f"start.gg/{plug_event['tournament']['slug']}"
         promo_channels = [x for x in current_channels if x not in optouts]
-        live_jazzybot_streams = self._twitch_interface.get_streams(
-                user_logins=promo_channels)
+        # diagnostic
+        print("Checking if Twitch streams are online.")
+        try:
+            live_jazzybot_streams = self._twitch_interface.get_streams(
+                    user_logins=promo_channels)
+        except twitch.InvalidAccessTokenError:
+            # diagnostic
+            print("Couldn't get live streams. Invalid access token.")
+            print("Refreshing access token and trying again.")
+            self._refresh_twitch_access_token()
+            live_jazzybot_streams = self._twitch_interface.get_streams(
+                    user_logins=promo_channels)
         for stream in live_jazzybot_streams:
             self._twitch_chat_send(
                 stream.user_login,
@@ -132,19 +145,14 @@ class CredentialsWriter:
 
 class TwitchChatReconnector:
     def __init__(
-            self, twitch_username: str, twitch_access_token: str,
-            twitch_refresh_token: str, twitch_client_id: str,
-            twitch_client_secret: str,
-            credentials_writer: CredentialsWriter,
+            self, twitch_username: str, twitch_access_getter: callable,
+            twitch_access_resetter: callable,
             twitch_chat_interface_setup: callable,
             twitch_chat_join: callable, interval_seconds: int=60,
             max_attempts: int=0, new_connection_timeout_sec: int=5) -> None:
         self._twitch_username = twitch_username
-        self._twitch_access_token = twitch_access_token
-        self._twitch_refresh_token = twitch_refresh_token
-        self._twitch_client_id = twitch_client_id
-        self._twitch_client_secret = twitch_client_secret
-        self._credentials_writer = credentials_writer
+        self._get_access_token = twitch_access_getter
+        self._reset_access_token = twitch_access_resetter
         self._twitch_chat_interface_setup = twitch_chat_interface_setup
         self._twitch_chat_join = twitch_chat_join
         self._interval_seconds = interval_seconds
@@ -153,7 +161,7 @@ class TwitchChatReconnector:
 
     def reconnect(self, refresh_first=False) -> None:
         if refresh_first:
-            self.refresh()
+            self._reset_access_token()
         attempts = 0
         while self._max_attempts <= 0 or attempts < self._max_attempts:
             attempts += 1
@@ -164,7 +172,7 @@ class TwitchChatReconnector:
             print(diag_str)
             try:
                 self._twitch_chat_interface_setup(
-                        self._twitch_username, self._twitch_access_token,
+                        self._twitch_username, self._get_access_token(),
                         self._new_connection_timeout_sec)
             except twitch_chat.TwitchChatDisconnectedError:
                 print(
@@ -179,20 +187,6 @@ class TwitchChatReconnector:
         for channel in joined_channels:
             self._twitch_chat_join(channel)
 
-    def refresh(self) -> None:
-        # diagnostic
-        print("Refreshing access token.")
-        refresh_response = twitch.get_refreshed_access_token(
-                self._twitch_refresh_token, self._twitch_client_id,
-                self._twitch_client_secret)
-        self._twitch_access_token = refresh_response["access_token"]
-        self._twitch_refresh_token = refresh_response["refresh_token"]
-        self._credentials_writer.update_credential(
-                "twitch_access_token", self._twitch_access_token)
-        self._credentials_writer.update_credential(
-                "twitch_refresh_token", self._twitch_refresh_token)
-        self._credentials_writer.export()
- 
 
 # Load credentials
 twitch_username = "botvencabot"
@@ -215,7 +209,11 @@ credentials_writer.update_credential(
 credentials_writer.update_credential("twitch_client_id", twitch_client_id)
 credentials_writer.update_credential(
         "twitch_client_secret", twitch_client_secret)
-credentials_writer.export()
+
+# Set up TwitchCredentialsManager
+twitch_credentials_manager = twitch.TwitchCredentialsManager(
+        twitch_client_id, twitch_client_secret, twitch_refresh_token,
+        twitch_access_token)
 
 # Set up direct_twitch_chat_interface
 twitch_chat_interface = twitch_chat.DirectInterface()
@@ -228,8 +226,8 @@ send_twitch_ping = twitch_chat_interface.ping
 with open(CURRENT_CHANNELS_PATH) as channels_file:
     joined_channels = channels_file.read().split()
 twitch_chat_reconnector = TwitchChatReconnector(
-        twitch_username, twitch_access_token, twitch_refresh_token,
-        twitch_client_id, twitch_client_secret, credentials_writer,
+        twitch_username, twitch_credentials_manager.get_access_token,
+        twitch_credentials_manager.refresh_access_token,
         twitch_chat_interface.setup, join_twitch_channel, 10)
 
 # Set up startgg_interface
@@ -237,7 +235,7 @@ startgg_interface = startgg.StartGGInterface(startgg_access_token)
 
 # Set up Twitch interface
 twitch_interface = twitch.TwitchInterface(
-        twitch_access_token, twitch_client_id)
+        twitch_credentials_manager.get_access_token, twitch_client_id)
 
 # Set up listeners
 twitch_chat_listener = twitch_chat.DirectInterfaceListener(
@@ -277,7 +275,8 @@ jazzycircuitbot_brain.start_listening(twitch_chat_listener)
 #twitch_chat_interface.send("vencabot", "thisll never get sent lol")
 routine_schedule = Schedule()
 promo_routine = JazzyEventPromoRoutine(
-        startgg_interface, twitch_interface, send_twitch_privmsg, 1800)
+        startgg_interface, twitch_interface, send_twitch_privmsg,
+        twitch_credentials_manager.refresh_access_token, 1800)
 routine_schedule.routines.append(promo_routine)
 schedule_thread = threading.Thread(
         target=routine_schedule.increment_loop, args=(1,))
@@ -285,3 +284,7 @@ schedule_thread.start()
 input()
 jazzycircuitbot_brain.stop()
 routine_schedule.stop()
+twitch_access_token = twitch_credentials_manager.get_access_token()
+credentials_writer.update_credential(
+        "twitch_access_token", twitch_access_token)
+credentials_writer.export()
