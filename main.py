@@ -6,6 +6,7 @@ import time
 import typing
 
 import handlers
+import src.givebutter as givebutter
 import src.startgg as startgg
 import src.streambrain as streambrain
 import src.twitch as twitch
@@ -48,6 +49,73 @@ class Schedule:
 
     def stop(self):
         self._incrementing_forever = False
+
+
+class GivebutterThankingRoutine(Routine):
+    def __init__(
+            self, givebutter_interface: givebutter.GivebutterInterface,
+            twitch_interface: twitch.TwitchInterface,
+            twitch_chat_send: callable,
+            refresh_twitch_access_token: callable,
+            processed_giving_space_ids: typing.List[int], interval_sec: int,
+            delay_sec: int=0) -> None:
+        self.givebutter_interface = givebutter_interface
+        self.twitch_interface = twitch_interface
+        self.twitch_chat_send = twitch_chat_send
+        self.refresh_twitch_access_token = refresh_twitch_access_token
+        self.processed_giving_space_ids = processed_giving_space_ids
+        super().__init__(interval_sec, delay_sec)
+
+    def run(self):
+        # diagnostic
+        print("Checking for new donations.")
+        new_donations = []
+        for transaction in self.givebutter_interface.get_transactions():
+            giving_space_id = transaction.giving_space.giving_space_id
+            if giving_space_id not in self.processed_giving_space_ids:
+                new_donations.append(transaction)
+        if not new_donations:
+            # diagnostic
+            print("No new donations.")
+            return
+        with open(CURRENT_CHANNELS_PATH) as current_channels_file:
+            # diagnostic
+            print("Got new donations", new_donations)
+            current_channels = current_channels_file.read().split()
+            # diagnostic
+            print("current channels", current_channels)
+        for transaction in new_donations:
+            giving_space_id = transaction.giving_space.giving_space_id
+            currency = transaction.currency
+            donor_name = transaction.giving_space.donor_name
+            amount = transaction.giving_space.amount
+            message = transaction.giving_space.message
+            chat_message = f"Thank you to {donor_name} for the "
+            if amount:
+                if currency == "USD":
+                    chat_message += f"${amount} "
+                else:
+                    chat_message += f"{amount} {currency} "
+            chat_message += (
+                    "donation to the Jazzy Givebutter @ "
+                    "givebutter.com/jazzy3s!")
+            if message:
+                chat_message += f" {donor_name} says: \"{message}\""
+            # diagnostic
+            print("Checking if Twitch streams are online.")
+            try:
+                live_jazzybot_streams = self.twitch_interface.get_streams(
+                        user_logins=current_channels)
+            except twitch.InvalidAccessTokenError:
+                # diagnostic
+                print("Couldn't get live streams. Invalid access token.")
+                print("Refreshing access token and trying again.")
+                self.refresh_twitch_access_token()
+                live_jazzybot_streams = self.twitch_interface.get_streams(
+                        user_logins=promo_channels)
+            for stream in live_jazzybot_streams:
+                self.twitch_chat_send(stream.user_login, chat_message)
+            self.processed_giving_space_ids.append(giving_space_id)
 
 
 class JazzyEventPromoRoutine(Routine):
@@ -197,6 +265,7 @@ twitch_refresh_token = credentials["twitch_refresh_token"]
 startgg_access_token = credentials["startgg_access_token"]
 twitch_client_id = credentials["twitch_client_id"]
 twitch_client_secret = credentials["twitch_client_secret"]
+givebutter_api_key = credentials["givebutter_api_key"]
 
 # Store credentials
 credentials_writer = CredentialsWriter("credentials.json")
@@ -209,6 +278,8 @@ credentials_writer.update_credential(
 credentials_writer.update_credential("twitch_client_id", twitch_client_id)
 credentials_writer.update_credential(
         "twitch_client_secret", twitch_client_secret)
+credentials_writer.update_credential(
+        "givebutter_api_key", givebutter_api_key)
 
 # Set up TwitchCredentialsManager
 twitch_credentials_manager = twitch.TwitchCredentialsManager(
@@ -267,17 +338,27 @@ except twitch_chat.LoginAuthenticationFailedError:
 for channel in joined_channels:
     twitch_chat_interface.join_channel(channel)
 
+# Givebutter stuff
+with open("processed_giving_space_ids.txt") as giving_space_ids_file:
+    processed_giving_space_ids = []
+    for giving_space_id_str in giving_space_ids_file.readlines():
+        giving_space_id_str = giving_space_id_str.strip()
+        if giving_space_id_str:
+            processed_giving_space_ids.append(int(giving_space_id_str))
+givebutter_interface = givebutter.GivebutterInterface(givebutter_api_key)
+givebutter_thanking_routine = GivebutterThankingRoutine(
+        givebutter_interface, twitch_interface, send_twitch_privmsg,
+        twitch_credentials_manager.refresh_access_token,
+        processed_giving_space_ids, 10)
+
 # Main loop
-#print(twitch_interface.get_streams(user_logins=["vencabot"]))
 jazzycircuitbot_brain.start_listening(twitch_chat_listener)
-#twitch_chat_interface.send("vencabot", "o shit lol")
-#input()
-#twitch_chat_interface.send("vencabot", "thisll never get sent lol")
 routine_schedule = Schedule()
 promo_routine = JazzyEventPromoRoutine(
         startgg_interface, twitch_interface, send_twitch_privmsg,
         twitch_credentials_manager.refresh_access_token, 1800)
 routine_schedule.routines.append(promo_routine)
+routine_schedule.routines.append(givebutter_thanking_routine)
 schedule_thread = threading.Thread(
         target=routine_schedule.increment_loop, args=(1,))
 schedule_thread.start()
@@ -288,3 +369,10 @@ twitch_access_token = twitch_credentials_manager.get_access_token()
 credentials_writer.update_credential(
         "twitch_access_token", twitch_access_token)
 credentials_writer.export()
+
+# Save processed giving space IDs to an output file.
+processed_giving_space_ids_output_str = ""
+for gs_id in givebutter_thanking_routine.processed_giving_space_ids:
+    processed_giving_space_ids_output_str += f"{gs_id}\n"
+with open("processed_giving_space_ids.txt", "w") as giving_space_ids_file:
+    giving_space_ids_file.write(processed_giving_space_ids_output_str)
