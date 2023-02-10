@@ -54,15 +54,17 @@ class Schedule:
 class GivebutterThankingRoutine(Routine):
     def __init__(
             self, givebutter_interface: givebutter.GivebutterInterface,
-            twitch_interface: twitch.TwitchInterface,
+            twitch_access_token: str, twitch_client_id: str,
+            twitch_client_secret: str, twitch_refresh_token: str,
             twitch_chat_send: callable,
-            refresh_twitch_access_token: callable,
             processed_giving_space_ids: typing.List[int], interval_sec: int,
             delay_sec: int=0) -> None:
         self.givebutter_interface = givebutter_interface
-        self.twitch_interface = twitch_interface
+        self.twitch_access_token = twitch_access_token
+        self.twitch_client_id = twitch_client_id
+        self.twitch_client_secret = twitch_client_secret
+        self.twitch_refresh_token = twitch_refresh_token
         self.twitch_chat_send = twitch_chat_send
-        self.refresh_twitch_access_token = refresh_twitch_access_token
         self.processed_giving_space_ids = processed_giving_space_ids
         super().__init__(interval_sec, delay_sec)
 
@@ -104,14 +106,19 @@ class GivebutterThankingRoutine(Routine):
             # diagnostic
             print("Checking if Twitch streams are online.")
             try:
-                live_jazzybot_streams = self.twitch_interface.get_streams(
+                live_jazzybot_streams = twitch.get_streams(
+                        self.twitch_access_token, self.twitch_client_id,
                         user_logins=current_channels)
-            except twitch.InvalidAccessTokenError:
-                # diagnostic
+            except twitch.TwitchHTTPError as e:
+                if e.code != 401:
+                    raise
                 print("Couldn't get live streams. Invalid access token.")
                 print("Refreshing access token and trying again.")
-                self.refresh_twitch_access_token()
-                live_jazzybot_streams = self.twitch_interface.get_streams(
+                self.twitch_access_token = twitch.refresh_access_token(
+                        self.twitch_client_id, self.twitch_client_secret,
+                        self.twitch_refresh_token)
+                live_jazzybot_streams = twitch.get_streams(
+                        self.twitch_access_token, self.twitch_client_id,
                         user_logins=promo_channels)
             for stream in live_jazzybot_streams:
                 self.twitch_chat_send(stream.user_login, chat_message)
@@ -121,14 +128,16 @@ class GivebutterThankingRoutine(Routine):
 class JazzyEventPromoRoutine(Routine):
     def __init__(
             self, startgg_interface: startgg.StartGGInterface,
-            twitch_interface: twitch.TwitchInterface,
-            twitch_chat_send: callable,
-            refresh_twitch_access_token: callable, interval_sec: int,
+            twitch_access_token: str, twitch_client_id: str,
+            twitch_client_secret: str, twitch_refresh_token: str,
+            twitch_chat_send: callable, interval_sec: int,
             delay_sec: int=0):
         self._startgg_interface = startgg_interface
-        self._twitch_interface = twitch_interface
+        self._twitch_access_token = twitch_access_token
+        self._twitch_client_id = twitch_client_id
+        self._twitch_client_secret = twitch_client_secret
+        self._twitch_refresh_token = twitch_refresh_token
         self._twitch_chat_send = twitch_chat_send
-        self._refresh_twitch_access_token = refresh_twitch_access_token
         self._plugged_event_ids = []
         super().__init__(interval_sec, delay_sec)
 
@@ -179,14 +188,20 @@ class JazzyEventPromoRoutine(Routine):
         # diagnostic
         print("Checking if Twitch streams are online.")
         try:
-            live_jazzybot_streams = self._twitch_interface.get_streams(
+            live_jazzybot_streams = twitch.get_streams(
+                    self._twitch_access_token, self._twitch_client_id,
                     user_logins=promo_channels)
-        except twitch.InvalidAccessTokenError:
+        except twitch.TwitchHTTPError as e:
+            if e.code != 401:
+                raise
             # diagnostic
             print("Couldn't get live streams. Invalid access token.")
             print("Refreshing access token and trying again.")
-            self._refresh_twitch_access_token()
-            live_jazzybot_streams = self._twitch_interface.get_streams(
+            self._twitch_access_token = twitch.refresh_access_token(
+                    self._twitch_client_id, self._twitch_client_secret,
+                    self._twitch_refresh_token)
+            live_jazzybot_streams = twitch.get_streams(
+                    self._twitch_access_token, self._twitch_client_id,
                     user_logins=promo_channels)
         for stream in live_jazzybot_streams:
             self._twitch_chat_send(
@@ -197,30 +212,19 @@ class JazzyEventPromoRoutine(Routine):
         self._plugged_event_ids.append(random_event_id)
  
 
-class CredentialsWriter:
-    def __init__(self, credentials_path: str) -> None:
-        self._credentials_path = credentials_path
-        self._stored_credentials = {}
-
-    def update_credential(self, service_name: str, credential_token: str):
-        self._stored_credentials[service_name] = credential_token
-
-    def export(self):
-        with open(self._credentials_path, "w") as credentials_file:
-            pretty_json = json.dumps(self._stored_credentials, indent=4)
-            credentials_file.write(pretty_json)
-
-
 class TwitchChatReconnector:
     def __init__(
-            self, twitch_username: str, twitch_access_getter: callable,
-            twitch_access_resetter: callable,
+            self, twitch_username: str, twitch_access_token: str,
+            twitch_client_id: str, twitch_client_secret: str,
+            twitch_refresh_token: str,
             twitch_chat_interface_setup: callable,
             twitch_chat_join: callable, interval_seconds: int=60,
             max_attempts: int=0, new_connection_timeout_sec: int=5) -> None:
         self._twitch_username = twitch_username
-        self._get_access_token = twitch_access_getter
-        self._reset_access_token = twitch_access_resetter
+        self._twitch_access_token = twitch_access_token
+        self._twitch_client_id = twitch_client_id
+        self._twitch_client_secret = twitch_client_secret
+        self._twitch_refresh_token = twitch_refresh_token
         self._twitch_chat_interface_setup = twitch_chat_interface_setup
         self._twitch_chat_join = twitch_chat_join
         self._interval_seconds = interval_seconds
@@ -229,7 +233,9 @@ class TwitchChatReconnector:
 
     def reconnect(self, refresh_first=False) -> None:
         if refresh_first:
-            self._reset_access_token()
+            self._twitch_access_token = twitch.refresh_access_token(
+                    self._twitch_client_id, self._twitch_client_secret,
+                    self._twitch_refresh_token)
         attempts = 0
         while self._max_attempts <= 0 or attempts < self._max_attempts:
             attempts += 1
@@ -240,7 +246,7 @@ class TwitchChatReconnector:
             print(diag_str)
             try:
                 self._twitch_chat_interface_setup(
-                        self._twitch_username, self._get_access_token(),
+                        self._twitch_username, self._twitch_access_token,
                         self._new_connection_timeout_sec)
             except twitch_chat.TwitchChatDisconnectedError:
                 print(
@@ -260,31 +266,13 @@ class TwitchChatReconnector:
 twitch_username = "botvencabot"
 with open("credentials.json") as credentials_file:
     credentials = json.loads(credentials_file.read())
-twitch_access_token = credentials["twitch_access_token"]
 twitch_refresh_token = credentials["twitch_refresh_token"]
 startgg_access_token = credentials["startgg_access_token"]
 twitch_client_id = credentials["twitch_client_id"]
 twitch_client_secret = credentials["twitch_client_secret"]
 givebutter_api_key = credentials["givebutter_api_key"]
-
-# Store credentials
-credentials_writer = CredentialsWriter("credentials.json")
-credentials_writer.update_credential(
-        "twitch_access_token", twitch_access_token)
-credentials_writer.update_credential(
-        "twitch_refresh_token", twitch_refresh_token)
-credentials_writer.update_credential(
-        "startgg_access_token", startgg_access_token)
-credentials_writer.update_credential("twitch_client_id", twitch_client_id)
-credentials_writer.update_credential(
-        "twitch_client_secret", twitch_client_secret)
-credentials_writer.update_credential(
-        "givebutter_api_key", givebutter_api_key)
-
-# Set up TwitchCredentialsManager
-twitch_credentials_manager = twitch.TwitchCredentialsManager(
-        twitch_client_id, twitch_client_secret, twitch_refresh_token,
-        twitch_access_token)
+twitch_access_token = twitch.refresh_access_token(
+        twitch_client_id, twitch_client_secret, twitch_refresh_token)
 
 # Set up direct_twitch_chat_interface
 twitch_chat_interface = twitch_chat.DirectInterface()
@@ -297,16 +285,12 @@ send_twitch_ping = twitch_chat_interface.ping
 with open(CURRENT_CHANNELS_PATH) as channels_file:
     joined_channels = channels_file.read().split()
 twitch_chat_reconnector = TwitchChatReconnector(
-        twitch_username, twitch_credentials_manager.get_access_token,
-        twitch_credentials_manager.refresh_access_token,
+        twitch_username, twitch_access_token, twitch_client_id,
+        twitch_client_secret, twitch_refresh_token,
         twitch_chat_interface.setup, join_twitch_channel, 10)
 
 # Set up startgg_interface
 startgg_interface = startgg.StartGGInterface(startgg_access_token)
-
-# Set up Twitch interface
-twitch_interface = twitch.TwitchInterface(
-        twitch_credentials_manager.get_access_token, twitch_client_id)
 
 # Set up listeners
 twitch_chat_listener = twitch_chat.DirectInterfaceListener(
@@ -347,16 +331,17 @@ with open("processed_giving_space_ids.txt") as giving_space_ids_file:
             processed_giving_space_ids.append(int(giving_space_id_str))
 givebutter_interface = givebutter.GivebutterInterface(givebutter_api_key)
 givebutter_thanking_routine = GivebutterThankingRoutine(
-        givebutter_interface, twitch_interface, send_twitch_privmsg,
-        twitch_credentials_manager.refresh_access_token,
+        givebutter_interface, twitch_access_token, twitch_client_id,
+        twitch_client_secret, twitch_refresh_token, send_twitch_privmsg,
         processed_giving_space_ids, 10)
 
 # Main loop
 jazzycircuitbot_brain.start_listening(twitch_chat_listener)
 routine_schedule = Schedule()
 promo_routine = JazzyEventPromoRoutine(
-        startgg_interface, twitch_interface, send_twitch_privmsg,
-        twitch_credentials_manager.refresh_access_token, 1800)
+        startgg_interface, twitch_access_token, twitch_client_id,
+        twitch_client_secret, twitch_refresh_token, send_twitch_privmsg,
+        1800)
 routine_schedule.routines.append(promo_routine)
 routine_schedule.routines.append(givebutter_thanking_routine)
 schedule_thread = threading.Thread(
@@ -365,10 +350,6 @@ schedule_thread.start()
 input()
 jazzycircuitbot_brain.stop()
 routine_schedule.stop()
-twitch_access_token = twitch_credentials_manager.get_access_token()
-credentials_writer.update_credential(
-        "twitch_access_token", twitch_access_token)
-credentials_writer.export()
 
 # Save processed giving space IDs to an output file.
 processed_giving_space_ids_output_str = ""
@@ -376,3 +357,9 @@ for gs_id in givebutter_thanking_routine.processed_giving_space_ids:
     processed_giving_space_ids_output_str += f"{gs_id}\n"
 with open("processed_giving_space_ids.txt", "w") as giving_space_ids_file:
     giving_space_ids_file.write(processed_giving_space_ids_output_str)
+
+# Testing space
+dnd_streams = twitch.get_streams(
+        twitch_access_token, twitch_client_id, game_ids=[509577])
+print(dnd_streams)
+print(len(dnd_streams))
