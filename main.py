@@ -72,7 +72,16 @@ class GivebutterThankingRoutine(Routine):
         # diagnostic
         print("Checking for new donations.")
         new_donations = []
-        for transaction in self.givebutter_interface.get_transactions():
+        try:
+            gb_transactions = self.givebutter_interface.get_transactions()
+        except Exception as e:
+            # We might run into urllib.error.HTTPError or some OSError.
+            # I would like to narrow this down to the exact Exceptions that
+            # we'll be running into at some point.
+            # diagnostic
+            print("Exception while getting Givebutter transactions.")
+            print(e)
+        for transaction in gb_transactions:
             giving_space_id = transaction.giving_space.giving_space_id
             if giving_space_id not in self.processed_giving_space_ids:
                 new_donations.append(transaction)
@@ -108,7 +117,7 @@ class GivebutterThankingRoutine(Routine):
             try:
                 live_jazzybot_streams = twitch.get_streams(
                         self.twitch_access_token, self.twitch_client_id,
-                        user_logins=current_channels)
+                        user_logins=current_channels)[0]
             except twitch.TwitchHTTPError as e:
                 if e.code != 401:
                     raise
@@ -119,7 +128,7 @@ class GivebutterThankingRoutine(Routine):
                         self.twitch_refresh_token)
                 live_jazzybot_streams = twitch.get_streams(
                         self.twitch_access_token, self.twitch_client_id,
-                        user_logins=promo_channels)
+                        user_logins=promo_channels)[0]
             for stream in live_jazzybot_streams:
                 self.twitch_chat_send(stream.user_login, chat_message)
             self.processed_giving_space_ids.append(giving_space_id)
@@ -190,7 +199,7 @@ class JazzyEventPromoRoutine(Routine):
         try:
             live_jazzybot_streams = twitch.get_streams(
                     self._twitch_access_token, self._twitch_client_id,
-                    user_logins=promo_channels)
+                    user_logins=promo_channels)[0]
         except twitch.TwitchHTTPError as e:
             if e.code != 401:
                 raise
@@ -202,7 +211,7 @@ class JazzyEventPromoRoutine(Routine):
                     self._twitch_refresh_token)
             live_jazzybot_streams = twitch.get_streams(
                     self._twitch_access_token, self._twitch_client_id,
-                    user_logins=promo_channels)
+                    user_logins=promo_channels)[0]
         for stream in live_jazzybot_streams:
             self._twitch_chat_send(
                 stream.user_login,
@@ -360,6 +369,17 @@ with open("processed_giving_space_ids.txt", "w") as giving_space_ids_file:
 
 # Testing space
 dnd_streams = twitch.get_streams(
-        twitch_access_token, twitch_client_id, game_ids=[509577])
-print(dnd_streams)
-print(len(dnd_streams))
+        twitch_access_token, twitch_client_id, game_ids=[509577])[0]
+#print(dnd_streams)
+#print(len(dnd_streams))
+vencabot_data = twitch.get_users(
+        twitch_access_token, twitch_client_id, logins=["vencabot"])
+if vencabot_data:
+    vencabot = vencabot_data[0]
+    vencas_schedule, metadata, cursor = twitch.get_channel_stream_schedule(
+            twitch_access_token, twitch_client_id, vencabot.user_id,
+            max_pages=2)
+    for segment in vencas_schedule:
+        print(segment.category_name)
+else:
+    print("Couldn't find Vencabot!")
