@@ -4,6 +4,7 @@ import random
 import threading
 import time
 import typing
+import urllib.error
 
 import handlers
 import src.givebutter as givebutter
@@ -39,7 +40,13 @@ class Schedule:
 
     def increment(self, increment_ticks: int):
         for routine in self.routines:
-            routine.increment(increment_ticks)
+            # diagnostic
+            try:
+                routine.increment(increment_ticks)
+            except Exception as e:
+                with open("error_that_killed_me.txt", "w") as crashlog_file:
+                    crashlog_file.write(e)
+                raise
 
     def increment_loop(self, sleep_sec: int, tick_sec_ratio: int=1):
         self._incrementing_forever = True
@@ -368,18 +375,14 @@ with open("processed_giving_space_ids.txt", "w") as giving_space_ids_file:
     giving_space_ids_file.write(processed_giving_space_ids_output_str)
 
 # Testing space
-dnd_streams = twitch.get_streams(
-        twitch_access_token, twitch_client_id, game_ids=[509577])[0]
-#print(dnd_streams)
-#print(len(dnd_streams))
-vencabot_data = twitch.get_users(
-        twitch_access_token, twitch_client_id, logins=["vencabot"])
-if vencabot_data:
-    vencabot = vencabot_data[0]
-    vencas_schedule, metadata, cursor = twitch.get_channel_stream_schedule(
-            twitch_access_token, twitch_client_id, vencabot.user_id,
-            max_pages=2)
-    for segment in vencas_schedule:
-        print(segment.category_name)
-else:
-    print("Couldn't find Vencabot!")
+venca_streams = twitch.get_streams(
+        twitch_access_token, twitch_client_id, user_logins=["vencabot"])
+vencabot = twitch.get_users(
+        twitch_access_token, twitch_client_id, logins=["vencabot"])[0]
+venca_schedule = twitch.get_channel_stream_schedule(
+        twitch_access_token, twitch_client_id, vencabot.user_id,
+        max_pages=2)
+
+print(venca_streams)
+print(vencabot.created_at.year)
+print(venca_schedule)
