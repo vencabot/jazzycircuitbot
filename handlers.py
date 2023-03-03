@@ -1,14 +1,48 @@
 import datetime
+import http.client
+import urllib
 
 import src.startgg as startgg
 import src.streambrain as streambrain
 import src.twitch_chat as twitch_chat
 
+from typing import Dict, List
+
+def safe_api_call(decorated: callable) -> callable:
+    def decorated_made_safe(*args, **kwargs) -> callable:
+        try:
+            return decorated(*args, **kwargs)
+        except http.client.IncompleteRead:
+            print("Non-critical: safe_api_call IncompleteRead. Passing.")
+        except TimeoutError:
+            print("Non-critical: safe_api_call TimeoutError. Passing.")
+        except urllib.error.URLError as e:
+            if "10060" in e.reason:
+                print(
+                        "Non-critical: safe_api_call URLError "
+                        "[WinError 10060]. Passing.")
+            else:
+                raise
+    return decorated_made_safe
+
+
+@safe_api_call
+def get_startgg_league_events(
+        access_token: str, league_slug: str) -> List[Dict]:
+    return startgg.get_league_events(access_token, league_slug)
+
+
+@safe_api_call
+def get_startgg_league_standings(
+        access_token: str, league_slug: str) -> List[Dict]:
+    return startgg.get_league_standings(access_token, league_slug)
+
+
 class TwitchChatCommandHandler(streambrain.Handler):
     def __init__(
             self, twitch_chat_send, twitch_chat_join, twitch_chat_part,
             joined_channels, current_channels_path,
-            event_promo_optouts_path, startgg_interface):
+            event_promo_optouts_path, startgg_access_token):
         super().__init__(twitch_chat.PrivateMessageEvent)
         self._twitch_chat_send = twitch_chat_send
         self._twitch_chat_join = twitch_chat_join
@@ -16,7 +50,7 @@ class TwitchChatCommandHandler(streambrain.Handler):
         self._joined_channels = joined_channels
         self._current_channels_path = current_channels_path
         self._event_promo_optouts_path = event_promo_optouts_path
-        self._startgg_interface = startgg_interface
+        self._startgg_access_token = startgg_access_token
 
     def handle(self, streambrain_event):
         chat_message_body = streambrain_event.message.message_body
@@ -41,7 +75,8 @@ class TwitchChatCommandHandler(streambrain.Handler):
             self.command_jazzystandings(channel)
 
     def command_jazzyevents(self, channel):
-        events = startgg.get_events(self._startgg_interface)
+        events = get_startgg_league_events(
+                self._startgg_access_token, "the-jazzy-circuit-4")
         now = datetime.datetime.now().timestamp()
         upcoming_events = []
         for event in events:
@@ -145,7 +180,8 @@ class TwitchChatCommandHandler(streambrain.Handler):
                 f"chat (must be modded first).")
 
     def command_jazzystandings(self, channel):
-        standings = self._startgg_interface.get_league_standings()
+        standings = get_startgg_league_standings(
+                self._startgg_access_token, "the-jazzy-circuit-4")
         top_players = []
         for standing in standings[:6]:
             gamer_tag = standing["player"]["gamerTag"]

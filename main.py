@@ -1,4 +1,5 @@
 import datetime
+import http.client
 import json
 import random
 import threading
@@ -13,8 +14,54 @@ import src.streambrain as streambrain
 import src.twitch as twitch
 import src.twitch_chat as twitch_chat
 
+from typing import Dict, List, Optional, Tuple
+
 CURRENT_CHANNELS_PATH = "current_channels.txt"
 EVENT_PROMO_OPTOUTS_PATH = "event_promo_optouts.txt"
+
+
+def safe_api_call(decorated: callable) -> callable:
+    def decorated_made_safe(*args, **kwargs) -> callable:
+        try:
+            return decorated(*args, **kwargs)
+        except http.client.IncompleteRead:
+            print("Non-critical: safe_api_call IncompleteRead. Passing.")
+        except TimeoutError:
+            print("Non-critical: safe_api_call TimeoutError. Passing.")
+        except urllib.error.URLError as e:
+            if "10060" in e.reason:
+                print(
+                        "Non-critical: safe_api_call URLError "
+                        "[WinError 10060]. Passing.")
+            else:
+                raise
+    return decorated_made_safe
+
+
+@safe_api_call
+def get_givebutter_transactions(
+        api_key: str) -> List[givebutter.Transaction]:
+    return givebutter.get_transactions(api_key)
+
+
+@safe_api_call
+def get_twitch_streams(
+        access_token: str, client_id: str, user_ids: List[int]=[],
+        user_logins: List[str]=[], game_ids: List[int]=[],
+        stream_type: Optional[str]=None, language: Optional[str]=None,
+        page_size: Optional[int]=None, max_pages: Optional[int]=None,
+        after: Optional[str]=None) \
+                -> Tuple[List[twitch.TwitchStreamData], str]:
+    return twitch.get_streams(
+            access_token, client_id, user_ids, user_logins, game_ids,
+            stream_type, language, page_size, max_pages, after)
+
+
+@safe_api_call
+def get_startgg_league_events(
+        access_token: str, league_slug: str) -> List[Dict]:
+    return startgg.get_league_events(access_token, league_slug)
+
 
 class Routine:
     def __init__(self, interval_ticks: int, delay_ticks: int=0):
@@ -60,13 +107,12 @@ class Schedule:
 
 class GivebutterThankingRoutine(Routine):
     def __init__(
-            self, givebutter_interface: givebutter.GivebutterInterface,
-            twitch_access_token: str, twitch_client_id: str,
-            twitch_client_secret: str, twitch_refresh_token: str,
-            twitch_chat_send: callable,
+            self, givebutter_api_key: str, twitch_access_token: str,
+            twitch_client_id: str, twitch_client_secret: str,
+            twitch_refresh_token: str, twitch_chat_send: callable,
             processed_giving_space_ids: typing.List[int], interval_sec: int,
             delay_sec: int=0) -> None:
-        self.givebutter_interface = givebutter_interface
+        self.givebutter_api_key = givebutter_api_key
         self.twitch_access_token = twitch_access_token
         self.twitch_client_id = twitch_client_id
         self.twitch_client_secret = twitch_client_secret
@@ -80,10 +126,8 @@ class GivebutterThankingRoutine(Routine):
         print("Checking for new donations.")
         new_donations = []
         try:
-            gb_transactions = self.givebutter_interface.get_transactions()
-        except http.client.IncompleteRead:
-            print("Got an IncompleteRead. We'll try again next time!")
-            return
+            gb_transactions = get_givebutter_transactions(
+                    self.givebutter_api_key)
         except Exception as e:
             # We might run into urllib.error.HTTPError or some OSError.
             # I would like to narrow this down to the exact Exceptions that
@@ -100,12 +144,29 @@ class GivebutterThankingRoutine(Routine):
             # diagnostic
             print("No new donations.")
             return
+        # diagnostic
+        print("Got new donations", new_donations)
         with open(CURRENT_CHANNELS_PATH) as current_channels_file:
-            # diagnostic
-            print("Got new donations", new_donations)
             current_channels = current_channels_file.read().split()
             # diagnostic
             print("current channels", current_channels)
+        # diagnostic
+        print("Checking if Twitch streams are online.")
+        try:
+            live_jazzybot_streams = get_twitch_streams(
+                    self.twitch_access_token, self.twitch_client_id,
+                    user_logins=current_channels)[0]
+        except twitch.TwitchHTTPError as e:
+            if e.code != 401:
+                raise
+            print("Couldn't get live streams. Invalid access token.")
+            print("Refreshing access token and trying again.")
+            self.twitch_access_token = twitch.refresh_access_token(
+                    self.twitch_client_id, self.twitch_client_secret,
+                    self.twitch_refresh_token)
+            live_jazzybot_streams = get_twitch_streams(
+                    self.twitch_access_token, self.twitch_client_id,
+                    user_logins=promo_channels)[0]
         for transaction in new_donations:
             giving_space_id = transaction.giving_space.giving_space_id
             currency = transaction.currency
@@ -123,23 +184,6 @@ class GivebutterThankingRoutine(Routine):
                     "givebutter.com/jazzy3s!")
             if message:
                 chat_message += f" {donor_name} says: \"{message}\""
-            # diagnostic
-            print("Checking if Twitch streams are online.")
-            try:
-                live_jazzybot_streams = twitch.get_streams(
-                        self.twitch_access_token, self.twitch_client_id,
-                        user_logins=current_channels)[0]
-            except twitch.TwitchHTTPError as e:
-                if e.code != 401:
-                    raise
-                print("Couldn't get live streams. Invalid access token.")
-                print("Refreshing access token and trying again.")
-                self.twitch_access_token = twitch.refresh_access_token(
-                        self.twitch_client_id, self.twitch_client_secret,
-                        self.twitch_refresh_token)
-                live_jazzybot_streams = twitch.get_streams(
-                        self.twitch_access_token, self.twitch_client_id,
-                        user_logins=promo_channels)[0]
             for stream in live_jazzybot_streams:
                 self.twitch_chat_send(stream.user_login, chat_message)
             self.processed_giving_space_ids.append(giving_space_id)
@@ -147,12 +191,11 @@ class GivebutterThankingRoutine(Routine):
 
 class JazzyEventPromoRoutine(Routine):
     def __init__(
-            self, startgg_interface: startgg.StartGGInterface,
-            twitch_access_token: str, twitch_client_id: str,
-            twitch_client_secret: str, twitch_refresh_token: str,
-            twitch_chat_send: callable, interval_sec: int,
-            delay_sec: int=0):
-        self._startgg_interface = startgg_interface
+            self, startgg_access_token: str, twitch_access_token: str,
+            twitch_client_id: str, twitch_client_secret: str,
+            twitch_refresh_token: str, twitch_chat_send: callable,
+            interval_sec: int, delay_sec: int=0):
+        self._startgg_access_token = startgg_access_token
         self._twitch_access_token = twitch_access_token
         self._twitch_client_id = twitch_client_id
         self._twitch_client_secret = twitch_client_secret
@@ -169,7 +212,8 @@ class JazzyEventPromoRoutine(Routine):
             optouts = event_promo_optouts_file.read().split()
         # diagnostic
         print("Getting startgg events.")
-        events = startgg.get_events(self._startgg_interface)
+        events = get_startgg_league_events(
+                self._startgg_access_token, "the-jazzy-circuit-4")
         now = datetime.datetime.now()
         max_datetime = now + datetime.timedelta(days=45)
         upcoming_events = {}
@@ -208,7 +252,7 @@ class JazzyEventPromoRoutine(Routine):
         # diagnostic
         print("Checking if Twitch streams are online.")
         try:
-            live_jazzybot_streams = twitch.get_streams(
+            live_jazzybot_streams = get_twitch_streams(
                     self._twitch_access_token, self._twitch_client_id,
                     user_logins=promo_channels)[0]
         except twitch.TwitchHTTPError as e:
@@ -220,7 +264,7 @@ class JazzyEventPromoRoutine(Routine):
             self._twitch_access_token = twitch.refresh_access_token(
                     self._twitch_client_id, self._twitch_client_secret,
                     self._twitch_refresh_token)
-            live_jazzybot_streams = twitch.get_streams(
+            live_jazzybot_streams = get_twitch_streams(
                     self._twitch_access_token, self._twitch_client_id,
                     user_logins=promo_channels)[0]
         for stream in live_jazzybot_streams:
@@ -228,7 +272,7 @@ class JazzyEventPromoRoutine(Routine):
                 stream.user_login,
                 f"Don't miss \"{tournament_name}\" in "
                 f"{tournament_city}, {tournament_state} on "
-                f"{tournament_date}! Learn more at {tournament_url}.")
+                f"{tournament_date}! Learn more at {tournament_url} .")
         self._plugged_event_ids.append(random_event_id)
  
 
@@ -309,9 +353,6 @@ twitch_chat_reconnector = TwitchChatReconnector(
         twitch_client_secret, twitch_refresh_token,
         twitch_chat_interface.setup, join_twitch_channel, 10)
 
-# Set up startgg_interface
-startgg_interface = startgg.StartGGInterface(startgg_access_token)
-
 # Set up listeners
 twitch_chat_listener = twitch_chat.DirectInterfaceListener(
         read_twitch_chat, send_twitch_ping,
@@ -321,7 +362,7 @@ twitch_chat_listener = twitch_chat.DirectInterfaceListener(
 twitch_chat_command_handler = handlers.TwitchChatCommandHandler(
         send_twitch_privmsg, join_twitch_channel, part_twitch_channel,
         joined_channels, CURRENT_CHANNELS_PATH, EVENT_PROMO_OPTOUTS_PATH,
-        startgg_interface)
+        startgg_access_token)
 leave_if_not_modded_handler = handlers.LeaveIfNotModdedHandler(
         send_twitch_privmsg, part_twitch_channel, joined_channels,
         CURRENT_CHANNELS_PATH)
@@ -349,9 +390,8 @@ with open("processed_giving_space_ids.txt") as giving_space_ids_file:
         giving_space_id_str = giving_space_id_str.strip()
         if giving_space_id_str:
             processed_giving_space_ids.append(int(giving_space_id_str))
-givebutter_interface = givebutter.GivebutterInterface(givebutter_api_key)
 givebutter_thanking_routine = GivebutterThankingRoutine(
-        givebutter_interface, twitch_access_token, twitch_client_id,
+        givebutter_api_key, twitch_access_token, twitch_client_id,
         twitch_client_secret, twitch_refresh_token, send_twitch_privmsg,
         processed_giving_space_ids, 10)
 
@@ -359,7 +399,7 @@ givebutter_thanking_routine = GivebutterThankingRoutine(
 jazzycircuitbot_brain.start_listening(twitch_chat_listener)
 routine_schedule = Schedule()
 promo_routine = JazzyEventPromoRoutine(
-        startgg_interface, twitch_access_token, twitch_client_id,
+        startgg_access_token, twitch_access_token, twitch_client_id,
         twitch_client_secret, twitch_refresh_token, send_twitch_privmsg,
         1800)
 routine_schedule.routines.append(promo_routine)
