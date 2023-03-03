@@ -45,7 +45,7 @@ class Schedule:
                 routine.increment(increment_ticks)
             except Exception as e:
                 with open("error_that_killed_me.txt", "w") as crashlog_file:
-                    crashlog_file.write(e)
+                    crashlog_file.write(str(e))
                 raise
 
     def increment_loop(self, sleep_sec: int, tick_sec_ratio: int=1):
@@ -81,6 +81,9 @@ class GivebutterThankingRoutine(Routine):
         new_donations = []
         try:
             gb_transactions = self.givebutter_interface.get_transactions()
+        except http.client.IncompleteRead:
+            print("Got an IncompleteRead. We'll try again next time!")
+            return
         except Exception as e:
             # We might run into urllib.error.HTTPError or some OSError.
             # I would like to narrow this down to the exact Exceptions that
@@ -88,6 +91,7 @@ class GivebutterThankingRoutine(Routine):
             # diagnostic
             print("Exception while getting Givebutter transactions.")
             print(e)
+            raise
         for transaction in gb_transactions:
             giving_space_id = transaction.giving_space.giving_space_id
             if giving_space_id not in self.processed_giving_space_ids:
