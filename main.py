@@ -2,6 +2,7 @@ import datetime
 import http.client
 import json
 import random
+import sys
 import threading
 import time
 import typing
@@ -13,6 +14,7 @@ import src.startgg as startgg
 import src.streambrain as streambrain
 import src.twitch as twitch
 import src.twitch_chat as twitch_chat
+import src.twitch_chat_listeners as twitch_chat_listeners
 
 from typing import Dict, List, Optional, Tuple
 
@@ -26,6 +28,10 @@ def safe_api_call(decorated: callable) -> callable:
             return decorated(*args, **kwargs)
         except http.client.IncompleteRead:
             print("Non-critical: safe_api_call IncompleteRead. Passing.")
+        except http.client.RemoteDisconnected:
+            print(
+                    "Non-critical: safe_api_call RemoteDisconnected. "
+                    "Passing.")
         except TimeoutError:
             print("Non-critical: safe_api_call TimeoutError. Passing.")
         except urllib.error.URLError as e:
@@ -91,8 +97,13 @@ class Schedule:
             try:
                 routine.increment(increment_ticks)
             except Exception as e:
+                exc_type, exc_object, exc_traceback = sys.exc_info()
+                exc_filename = exc_traceback.tb_frame.f_code.co_filename
+                exc_line_no = exc_traceback.tb_lineno
                 with open("error_that_killed_me.txt", "w") as crashlog_file:
-                    crashlog_file.write(str(e))
+                    crashlog_file.write(
+                            f"{exc_type.__name__} in {exc_filename} at "
+                            f"line {exc_line_no}: {exc_object}")
                 raise
 
     def increment_loop(self, sleep_sec: int, tick_sec_ratio: int=1):
@@ -166,7 +177,7 @@ class GivebutterThankingRoutine(Routine):
                     self.twitch_refresh_token)
             live_jazzybot_streams = get_twitch_streams(
                     self.twitch_access_token, self.twitch_client_id,
-                    user_logins=promo_channels)[0]
+                    user_logins=current_channels)[0]
         for transaction in new_donations:
             giving_space_id = transaction.giving_space.giving_space_id
             currency = transaction.currency
@@ -345,7 +356,6 @@ send_twitch_privmsg = twitch_chat_interface.send
 join_twitch_channel = twitch_chat_interface.join_channel
 part_twitch_channel = twitch_chat_interface.part_channel
 send_twitch_pong = twitch_chat_interface.pong
-send_twitch_ping = twitch_chat_interface.ping
 with open(CURRENT_CHANNELS_PATH) as channels_file:
     joined_channels = channels_file.read().split()
 twitch_chat_reconnector = TwitchChatReconnector(
@@ -354,9 +364,8 @@ twitch_chat_reconnector = TwitchChatReconnector(
         twitch_chat_interface.setup, join_twitch_channel, 10)
 
 # Set up listeners
-twitch_chat_listener = twitch_chat.DirectInterfaceListener(
-        read_twitch_chat, send_twitch_ping,
-        twitch_chat_reconnector.reconnect)
+twitch_chat_listener = twitch_chat_listeners.DirectInterfaceListener(
+        read_twitch_chat)
 
 # Set up handlers
 twitch_chat_command_handler = handlers.TwitchChatCommandHandler(
@@ -367,6 +376,10 @@ leave_if_not_modded_handler = handlers.LeaveIfNotModdedHandler(
         send_twitch_privmsg, part_twitch_channel, joined_channels,
         CURRENT_CHANNELS_PATH)
 ping_handler = handlers.PingHandler(send_twitch_pong)
+twitch_chat_disconnected_handler = handlers.TwitchChatDisconnectedHandler(
+        twitch_chat_reconnector.reconnect)
+twitch_chat_notice_handler = handlers.TwitchChatNoticeHandler(
+        twitch_chat_reconnector.reconnect)
 
 # Create StreamBrain
 jazzycircuitbot_brain = streambrain.StreamBrain()

@@ -5,8 +5,12 @@ import urllib
 import src.startgg as startgg
 import src.streambrain as streambrain
 import src.twitch_chat as twitch_chat
+import src.twitch_chat_listeners as twitch_chat_listeners
 
 from typing import Dict, List
+
+
+FAILED_LOGIN_IRC_PARAMS = ["*", "Login authentication failed"]
 
 def safe_api_call(decorated: callable) -> callable:
     def decorated_made_safe(*args, **kwargs) -> callable:
@@ -14,6 +18,10 @@ def safe_api_call(decorated: callable) -> callable:
             return decorated(*args, **kwargs)
         except http.client.IncompleteRead:
             print("Non-critical: safe_api_call IncompleteRead. Passing.")
+        except http.client.RemoteDisconnected:
+            print(
+                    "Non-critical: safe_api_call RemoteDisconnected. "
+                    "Passing.")
         except TimeoutError:
             print("Non-critical: safe_api_call TimeoutError. Passing.")
         except urllib.error.URLError as e:
@@ -43,7 +51,7 @@ class TwitchChatCommandHandler(streambrain.Handler):
             self, twitch_chat_send, twitch_chat_join, twitch_chat_part,
             joined_channels, current_channels_path,
             event_promo_optouts_path, startgg_access_token):
-        super().__init__(twitch_chat.PrivateMessageEvent)
+        super().__init__(twitch_chat_listeners.PrivateMessageEvent)
         self._twitch_chat_send = twitch_chat_send
         self._twitch_chat_join = twitch_chat_join
         self._twitch_chat_part = twitch_chat_part
@@ -210,7 +218,7 @@ class LeaveIfNotModdedHandler(streambrain.Handler):
     def __init__(
             self, twitch_chat_send, twitch_chat_part, joined_channels,
             current_channels_path):
-        super().__init__(twitch_chat.UserstateEvent)
+        super().__init__(twitch_chat_listeners.UserstateEvent)
         self._twitch_chat_send = twitch_chat_send
         self._twitch_chat_part = twitch_chat_part
         self._joined_channels = joined_channels
@@ -234,8 +242,31 @@ class LeaveIfNotModdedHandler(streambrain.Handler):
 
 class PingHandler(streambrain.Handler):
     def __init__(self, twitch_chat_direct_interface_pong):
-        super().__init__(twitch_chat.PingEvent)
+        super().__init__(twitch_chat_listeners.PingEvent)
         self._pong = twitch_chat_direct_interface_pong
 
     def handle(self, streambrain_event):
+        # diagnostic
+        print("Got ping. Sending pong.")
         self._pong(streambrain_event.message)
+
+
+class TwitchChatDisconnectedHandler(streambrain.Handler):
+    def __init__(self, twitch_chat_reconnect: callable):
+        super().__init__(twitch_chat_listeners.DisconnectedEvent)
+        self._twitch_chat_reconnect = twitch_chat_reconnect
+
+    def handle(self, streambrain_event):
+        # diagnostic
+        print("Disconnected from Twitch chat. Attempting to reconnect.")
+        self._twitch_chat_reconnect()
+
+
+class TwitchChatNoticeHandler(streambrain.Handler):
+    def __init__(self, twitch_chat_reconnect: callable):
+        super().__init__(twitch_chat_listeners.NoticeEvent)
+        self._twitch_chat_reconnect = twitch_chat_reconnect
+
+    def handle(self, streambrain_event):
+        if streambrain_event.message.parameters == FAILED_LOGIN_IRC_PARAMS:
+            self._twitch_chat_reconnect(True)

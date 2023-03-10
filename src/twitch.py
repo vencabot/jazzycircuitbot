@@ -4,10 +4,7 @@ import json
 import urllib.parse
 import urllib.request
 
-from typing import List
-from typing import Optional
-from typing import Tuple
-from typing import Union
+from typing import List, Optional, Tuple, Union
 
 
 API_ENDPOINT_REFERENCE_ANCHOR_MAP = {
