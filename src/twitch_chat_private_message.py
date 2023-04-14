@@ -1,16 +1,9 @@
-import socket
-
-from typing import List, Optional
-
-from .streambrain import Event, Listener
-from .twitch_chat import TwitchChatDisconnectedError, TwitchIRCMessage
-
 OPTIONAL_PRIVMSG_TAGS = [
         "bits", "reply_parent_msg_id", "reply_parent_user_login",
         "reply_parent_display_name", "reply_parent_msg_body", "vip"]
 
 
-class PrivateMessage:
+class TwitchPrivateMessage:
     def __init__(
             self,
             badge_info: dict,           # 'Badge' : 'badge info' pairs
@@ -60,83 +53,6 @@ class PrivateMessage:
         self.reply_parent_user_login = reply_parent_user_login
         self.reply_parent_display_name = reply_parent_display_name
         self.reply_parent_msg_body = reply_parent_msg_body
-
-
-class PrivateMessageEvent(Event):
-    def __init__(self, twitch_private_message: PrivateMessage):
-        super().__init__(twitch_private_message)
-
-
-class PingEvent(Event):
-    def __init__(self, ping_message_parameters: List[str]):
-        super().__init__(ping_message_parameters)
-
-
-class PongEvent(Event):
-    def __init__(self, pong_message_parameters: List[str]):
-        super().__init__(pong_message_parameters)
-
-
-class JoinEvent(Event):
-    def __init__(self, twitch_irc_message):
-        super().__init__(twitch_irc_message)
-
-
-class UserstateEvent(Event):
-    def __init__(self, twitch_irc_message):
-        super().__init__(twitch_irc_message)
-
-
-class TimeoutEvent(Event):
-    def __init__(self, error: Exception) -> None:
-        super().__init__(error)
-
-
-class DisconnectedEvent(Event):
-    def __init__(self, error: Exception) -> None:
-        super().__init__(error)
-
-
-class NoticeEvent(Event):
-    def __init__(self, twitch_irc_message):
-        super().__init__(twitch_irc_message)
-
-
-class DirectInterfaceListener(Listener):
-    def __init__(
-            self, twitch_chat_read: callable, sleep_sec: int = 0) -> None:
-        super().__init__(sleep_sec)
-        self._twitch_chat_read = twitch_chat_read
-
-    def listen(self) -> List[Event]:
-        try:
-            new_messages = self._twitch_chat_read()
-        except socket.timeout as e:
-            print("diag got timeout")
-            return [TimeoutEvent(e)]
-        except TwitchChatDisconnectedError as e:
-            return [DisconnectedEvent(e)]
-        events = []
-        for irc_message in new_messages:
-            if irc_message.command == "PRIVMSG":
-                message = create_private_message_object_from(irc_message)
-                event = PrivateMessageEvent(message)
-                events.append(event)
-            elif irc_message.command == "PING":
-                events.append(PingEvent(irc_message.parameters))
-            elif irc_message.command == "PONG":
-                events.append(PongEvent(irc_message.parameters))
-            elif irc_message.command == "JOIN":
-                events.append(JoinEvent(irc_message))
-            elif irc_message.command == "USERSTATE":
-                events.append(UserstateEvent(irc_message))
-            elif irc_message.command == "NOTICE":
-                events.append(NoticeEvent(irc_message))
-                # if irc_message.parameters == (
-                #        ["*", "Login authentication failed"]):
-                #    print("Login authenticationed failed! Boooo! T_T")
-                #    self._twitch_chat_reconnect(True)
-        return events
 
 
 def create_private_message_object_from(

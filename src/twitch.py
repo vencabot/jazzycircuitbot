@@ -89,6 +89,30 @@ class TwitchUser:
     created_at: datetime.datetime
 
 
+class TwitchOauthManager:
+    def __init__(
+            self, client_id: str, client_secret: str,
+            refresh_token: str) -> None:
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self.refresh_token = refresh_token
+        self.access_token = None
+        self.refreshed_at = None
+        self.expires_in = None
+        self.scope = None
+        self.token_type = None
+
+    def refresh(self):
+        refreshed_token_data = refresh_access_token(
+                self.client_id, self.client_secret, self.refresh_token)
+        self.refresh_token = refreshed_token_data["refresh_token"]
+        self.access_token = refreshed_token_data["access_token"]
+        self.expires_in = refreshed_token_data["expires_in"]
+        self.scope = refreshed_token_data["scope"]
+        self.token_type = refreshed_token_data["token_type"]
+        self.refreshed_at = datetime.datetime.now()
+
+
 def _call_api(
         access_token: str, client_id: str, endpoint: str,
         query_parameters: List[Tuple[str, Union[int, str]]]) -> dict:
@@ -267,4 +291,4 @@ def refresh_access_token(
     if "error" in response_data:
         if response_data["message"] == "Invalid refresh token":
             raise InvalidRefreshTokenError(refresh_token)
-    return response_data["access_token"]
+    return response_data

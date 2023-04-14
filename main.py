@@ -4,19 +4,24 @@ import json
 import random
 import sys
 import threading
-import time
 import typing
 import urllib.error
 
-import handlers
 import src.givebutter as givebutter
 import src.startgg as startgg
-import src.streambrain as streambrain
-import src.twitch as twitch
-import src.twitch_chat as twitch_chat
-import src.twitch_chat_listeners as twitch_chat_listeners
+import src.irc_client_listener as irc_client_listener
 
+from time import sleep
 from typing import Dict, List, Optional, Tuple
+
+from src.irc_client import IRCClient
+from src.irc_client_handlers import (
+        ReportTimeoutHandler, LeaveIfNotModdedHandler, PongIfPingedHandler,
+        TwitchChatLoginFailedHandler)
+from src.streambrain import StreamBrain
+from src.twitch import (
+        TwitchHTTPError, TwitchStreamData, TwitchOauthManager, get_streams)
+from src.twitch_chat_command_handler import TwitchChatCommandHandler
 
 CURRENT_CHANNELS_PATH = "current_channels.txt"
 EVENT_PROMO_OPTOUTS_PATH = "event_promo_optouts.txt"
@@ -41,6 +46,13 @@ def safe_api_call(decorated: callable) -> callable:
                         "[WinError 10060]. Passing.")
             else:
                 raise
+        except urllib.error.HTTPError as e:
+            if e.code == 524:
+                print(
+                        "Non-critical: safe_api_call HTTPError code 524. "
+                        "Passing.")
+            else:
+                raise
     return decorated_made_safe
 
 
@@ -52,15 +64,29 @@ def get_givebutter_transactions(
 
 @safe_api_call
 def get_twitch_streams(
-        access_token: str, client_id: str, user_ids: List[int]=[],
+        twitch_oauth_manager: TwitchOauthManager, user_ids: List[int]=[],
         user_logins: List[str]=[], game_ids: List[int]=[],
         stream_type: Optional[str]=None, language: Optional[str]=None,
         page_size: Optional[int]=None, max_pages: Optional[int]=None,
-        after: Optional[str]=None) \
-                -> Tuple[List[twitch.TwitchStreamData], str]:
-    return twitch.get_streams(
-            access_token, client_id, user_ids, user_logins, game_ids,
-            stream_type, language, page_size, max_pages, after)
+        after: Optional[str]=None) -> Tuple[List[TwitchStreamData], str]:
+    already_failed = False
+    while True:
+        try:
+            return get_streams(
+                    twitch_oauth_manager.access_token,
+                    twitch_oauth_manager.client_id, user_ids, user_logins,
+                    game_ids, stream_type, language, page_size, max_pages,
+                    after)
+        except TwitchHTTPError as e:
+            if e.code != 401:
+                raise
+            if already_failed:
+                raise Exception(
+                        "get_twitch_streams: Twitch API key is invalid.")
+            print("Couldn't get live streams. Invalid access token.")
+            print("Refreshing access token and trying again.")
+            twitch_oauth_manager.refresh()
+            already_failed = True
 
 
 @safe_api_call
@@ -110,7 +136,7 @@ class Schedule:
         self._incrementing_forever = True
         while self._incrementing_forever:
             self.increment(sleep_sec * tick_sec_ratio)
-            time.sleep(sleep_sec)
+            sleep(sleep_sec)
 
     def stop(self):
         self._incrementing_forever = False
@@ -118,17 +144,13 @@ class Schedule:
 
 class GivebutterThankingRoutine(Routine):
     def __init__(
-            self, givebutter_api_key: str, twitch_access_token: str,
-            twitch_client_id: str, twitch_client_secret: str,
-            twitch_refresh_token: str, twitch_chat_send: callable,
+            self, givebutter_api_key: str,
+            twitch_oauth_manager: TwitchOauthManager, irc_client: IRCClient,
             processed_giving_space_ids: typing.List[int], interval_sec: int,
             delay_sec: int=0) -> None:
         self.givebutter_api_key = givebutter_api_key
-        self.twitch_access_token = twitch_access_token
-        self.twitch_client_id = twitch_client_id
-        self.twitch_client_secret = twitch_client_secret
-        self.twitch_refresh_token = twitch_refresh_token
-        self.twitch_chat_send = twitch_chat_send
+        self.twitch_oauth_manager = twitch_oauth_manager
+        self.irc_client = irc_client
         self.processed_giving_space_ids = processed_giving_space_ids
         super().__init__(interval_sec, delay_sec)
 
@@ -157,27 +179,10 @@ class GivebutterThankingRoutine(Routine):
             return
         # diagnostic
         print("Got new donations", new_donations)
-        with open(CURRENT_CHANNELS_PATH) as current_channels_file:
-            current_channels = current_channels_file.read().split()
-            # diagnostic
-            print("current channels", current_channels)
-        # diagnostic
         print("Checking if Twitch streams are online.")
-        try:
-            live_jazzybot_streams = get_twitch_streams(
-                    self.twitch_access_token, self.twitch_client_id,
-                    user_logins=current_channels)[0]
-        except twitch.TwitchHTTPError as e:
-            if e.code != 401:
-                raise
-            print("Couldn't get live streams. Invalid access token.")
-            print("Refreshing access token and trying again.")
-            self.twitch_access_token = twitch.refresh_access_token(
-                    self.twitch_client_id, self.twitch_client_secret,
-                    self.twitch_refresh_token)
-            live_jazzybot_streams = get_twitch_streams(
-                    self.twitch_access_token, self.twitch_client_id,
-                    user_logins=current_channels)[0]
+        live_jazzybot_streams = get_twitch_streams(
+                self.twitch_oauth_manager,
+                user_logins=self.irc_client.channels)[0]
         for transaction in new_donations:
             giving_space_id = transaction.giving_space.giving_space_id
             currency = transaction.currency
@@ -196,29 +201,24 @@ class GivebutterThankingRoutine(Routine):
             if message:
                 chat_message += f" {donor_name} says: \"{message}\""
             for stream in live_jazzybot_streams:
-                self.twitch_chat_send(stream.user_login, chat_message)
+                self.irc_client.private_message(
+                        stream.user_login, chat_message)
             self.processed_giving_space_ids.append(giving_space_id)
 
 
 class JazzyEventPromoRoutine(Routine):
     def __init__(
-            self, startgg_access_token: str, twitch_access_token: str,
-            twitch_client_id: str, twitch_client_secret: str,
-            twitch_refresh_token: str, twitch_chat_send: callable,
+            self, startgg_access_token: str,
+            twitch_oauth_manager: TwitchOauthManager, irc_client: IRCClient,
             interval_sec: int, delay_sec: int=0):
         self._startgg_access_token = startgg_access_token
-        self._twitch_access_token = twitch_access_token
-        self._twitch_client_id = twitch_client_id
-        self._twitch_client_secret = twitch_client_secret
-        self._twitch_refresh_token = twitch_refresh_token
-        self._twitch_chat_send = twitch_chat_send
+        self._twitch_oauth_manager = twitch_oauth_manager
+        self._irc_client = irc_client
         self._plugged_event_ids = []
         super().__init__(interval_sec, delay_sec)
 
     def run(self):
         # This code is hideous and I'm sorry. I'm gonna refactor it.
-        with open(CURRENT_CHANNELS_PATH) as current_channels_file:
-            current_channels = current_channels_file.read().split()
         with open(EVENT_PROMO_OPTOUTS_PATH) as event_promo_optouts_file:
             optouts = event_promo_optouts_file.read().split()
         # diagnostic
@@ -259,83 +259,23 @@ class JazzyEventPromoRoutine(Routine):
                 f"{tournament_datetime.strftime('%a, %b ')} "
                 f"{tournament_day}{day_suffix}")
         tournament_url = f"start.gg/{plug_event['tournament']['slug']}"
-        promo_channels = [x for x in current_channels if x not in optouts]
+        promo_channels = []
+        for channel_name in self._irc_client.channels:
+            if channel_name not in optouts:
+                promo_channels.append(channel_name)
         # diagnostic
         print("Checking if Twitch streams are online.")
-        try:
-            live_jazzybot_streams = get_twitch_streams(
-                    self._twitch_access_token, self._twitch_client_id,
-                    user_logins=promo_channels)[0]
-        except twitch.TwitchHTTPError as e:
-            if e.code != 401:
-                raise
-            # diagnostic
-            print("Couldn't get live streams. Invalid access token.")
-            print("Refreshing access token and trying again.")
-            self._twitch_access_token = twitch.refresh_access_token(
-                    self._twitch_client_id, self._twitch_client_secret,
-                    self._twitch_refresh_token)
-            live_jazzybot_streams = get_twitch_streams(
-                    self._twitch_access_token, self._twitch_client_id,
-                    user_logins=promo_channels)[0]
+        live_jazzybot_streams = get_twitch_streams(
+                self._twitch_oauth_manager,
+                user_logins=self._irc_client.channels)[0]
         for stream in live_jazzybot_streams:
-            self._twitch_chat_send(
+            self._irc_client.private_message(
                 stream.user_login,
                 f"Don't miss \"{tournament_name}\" in "
                 f"{tournament_city}, {tournament_state} on "
                 f"{tournament_date}! Learn more at {tournament_url} .")
         self._plugged_event_ids.append(random_event_id)
  
-
-class TwitchChatReconnector:
-    def __init__(
-            self, twitch_username: str, twitch_access_token: str,
-            twitch_client_id: str, twitch_client_secret: str,
-            twitch_refresh_token: str,
-            twitch_chat_interface_setup: callable,
-            twitch_chat_join: callable, interval_seconds: int=60,
-            max_attempts: int=0, new_connection_timeout_sec: int=5) -> None:
-        self._twitch_username = twitch_username
-        self._twitch_access_token = twitch_access_token
-        self._twitch_client_id = twitch_client_id
-        self._twitch_client_secret = twitch_client_secret
-        self._twitch_refresh_token = twitch_refresh_token
-        self._twitch_chat_interface_setup = twitch_chat_interface_setup
-        self._twitch_chat_join = twitch_chat_join
-        self._interval_seconds = interval_seconds
-        self._max_attempts = max_attempts
-        self._new_connection_timeout_sec = new_connection_timeout_sec
-
-    def reconnect(self, refresh_first=False) -> None:
-        if refresh_first:
-            self._twitch_access_token = twitch.refresh_access_token(
-                    self._twitch_client_id, self._twitch_client_secret,
-                    self._twitch_refresh_token)
-        attempts = 0
-        while self._max_attempts <= 0 or attempts < self._max_attempts:
-            attempts += 1
-            # diagnostic
-            diag_str = f"Twitch chat reconnect attempt #{attempts}"
-            if self._max_attempts > 0:
-                diag_str += f" of {self._max_attempts}"
-            print(diag_str)
-            try:
-                self._twitch_chat_interface_setup(
-                        self._twitch_username, self._twitch_access_token,
-                        self._new_connection_timeout_sec)
-            except twitch_chat.TwitchChatDisconnectedError:
-                print(
-                        "Reconnection failed. Trying again in "
-                        f"{self._interval_seconds} seconds.") 
-                time.sleep(self._interval_seconds)
-                continue
-            else:
-                break
-        with open(CURRENT_CHANNELS_PATH) as channels_file:
-            joined_channels = channels_file.read().split()
-        for channel in joined_channels:
-            self._twitch_chat_join(channel)
-
 
 # Load credentials
 twitch_username = "botvencabot"
@@ -346,75 +286,64 @@ startgg_access_token = credentials["startgg_access_token"]
 twitch_client_id = credentials["twitch_client_id"]
 twitch_client_secret = credentials["twitch_client_secret"]
 givebutter_api_key = credentials["givebutter_api_key"]
-twitch_access_token = twitch.refresh_access_token(
+twitch_oauth_manager = TwitchOauthManager(
         twitch_client_id, twitch_client_secret, twitch_refresh_token)
+twitch_oauth_manager.refresh()
 
-# Set up direct_twitch_chat_interface
-twitch_chat_interface = twitch_chat.DirectInterface()
-read_twitch_chat = twitch_chat_interface.read
-send_twitch_privmsg = twitch_chat_interface.send
-join_twitch_channel = twitch_chat_interface.join_channel
-part_twitch_channel = twitch_chat_interface.part_channel
-send_twitch_pong = twitch_chat_interface.pong
-with open(CURRENT_CHANNELS_PATH) as channels_file:
-    joined_channels = channels_file.read().split()
-twitch_chat_reconnector = TwitchChatReconnector(
-        twitch_username, twitch_access_token, twitch_client_id,
-        twitch_client_secret, twitch_refresh_token,
-        twitch_chat_interface.setup, join_twitch_channel, 10)
+# Set up Twitch chat
+twitch_chat = IRCClient()
+twitch_chat.connect("irc.chat.twitch.tv")
 
 # Set up listeners
-twitch_chat_listener = twitch_chat_listeners.DirectInterfaceListener(
-        read_twitch_chat)
+twitch_chat_listener = irc_client_listener.IRCClientListener(twitch_chat)
 
 # Set up handlers
-twitch_chat_command_handler = handlers.TwitchChatCommandHandler(
-        send_twitch_privmsg, join_twitch_channel, part_twitch_channel,
-        joined_channels, CURRENT_CHANNELS_PATH, EVENT_PROMO_OPTOUTS_PATH,
+twitch_chat_command_handler = TwitchChatCommandHandler(
+        twitch_chat, CURRENT_CHANNELS_PATH, EVENT_PROMO_OPTOUTS_PATH,
         startgg_access_token)
-leave_if_not_modded_handler = handlers.LeaveIfNotModdedHandler(
-        send_twitch_privmsg, part_twitch_channel, joined_channels,
-        CURRENT_CHANNELS_PATH)
-ping_handler = handlers.PingHandler(send_twitch_pong)
-twitch_chat_disconnected_handler = handlers.TwitchChatDisconnectedHandler(
-        twitch_chat_reconnector.reconnect)
-twitch_chat_notice_handler = handlers.TwitchChatNoticeHandler(
-        twitch_chat_reconnector.reconnect)
+leave_if_not_modded_handler = LeaveIfNotModdedHandler(
+        twitch_chat, CURRENT_CHANNELS_PATH)
+pong_if_pinged_handler = PongIfPingedHandler(twitch_chat)
+twitch_chat_login_failed_handler = TwitchChatLoginFailedHandler(
+        twitch_chat, twitch_oauth_manager)
+report_timeout_handler = ReportTimeoutHandler()
 
 # Create StreamBrain
-jazzycircuitbot_brain = streambrain.StreamBrain()
+jazzycircuitbot_brain = StreamBrain()
 jazzycircuitbot_brain.activate_handler(twitch_chat_command_handler)
 jazzycircuitbot_brain.activate_handler(leave_if_not_modded_handler)
-jazzycircuitbot_brain.activate_handler(ping_handler)
+jazzycircuitbot_brain.activate_handler(pong_if_pinged_handler)
+jazzycircuitbot_brain.activate_handler(twitch_chat_login_failed_handler)
+jazzycircuitbot_brain.activate_handler(report_timeout_handler)
 
-# Connect to Twitch chat
-try:
-    twitch_chat_interface.setup(twitch_username, twitch_access_token)
-except twitch_chat.LoginAuthenticationFailedError:
-    print("Initial Twitch chat login failed. Attempting reconnection.")
-    twitch_chat_reconnector.reconnect()
-for channel in joined_channels:
-    twitch_chat_interface.join_channel(channel)
+# Login to Twitch chat
+twitch_password = f"oauth:{twitch_oauth_manager.access_token}"
+twitch_chat.login(twitch_password, twitch_username, None)
+twitch_chat.request_capability("twitch.tv/tags")
+twitch_chat.request_capability("twitch.tv/membership")
+twitch_chat.request_capability("twitch.tv/commands")
+with open(CURRENT_CHANNELS_PATH) as current_channels_file:
+    raw_channel_lines = current_channels_file.readlines()
+for raw_channel_line in raw_channel_lines:
+    twitch_chat.join(raw_channel_line.strip())
 
 # Givebutter stuff
 with open("processed_giving_space_ids.txt") as giving_space_ids_file:
-    processed_giving_space_ids = []
-    for giving_space_id_str in giving_space_ids_file.readlines():
-        giving_space_id_str = giving_space_id_str.strip()
-        if giving_space_id_str:
-            processed_giving_space_ids.append(int(giving_space_id_str))
+    raw_giving_space_id_strs = giving_space_ids_file.readlines()
+processed_giving_space_ids = []
+for raw_giving_space_id_str in raw_giving_space_id_strs:
+    giving_space_id_str = raw_giving_space_id_str.strip()
+    if giving_space_id_str:
+        processed_giving_space_ids.append(int(giving_space_id_str))
 givebutter_thanking_routine = GivebutterThankingRoutine(
-        givebutter_api_key, twitch_access_token, twitch_client_id,
-        twitch_client_secret, twitch_refresh_token, send_twitch_privmsg,
+        givebutter_api_key, twitch_oauth_manager, twitch_chat,
         processed_giving_space_ids, 10)
 
 # Main loop
 jazzycircuitbot_brain.start_listening(twitch_chat_listener)
 routine_schedule = Schedule()
 promo_routine = JazzyEventPromoRoutine(
-        startgg_access_token, twitch_access_token, twitch_client_id,
-        twitch_client_secret, twitch_refresh_token, send_twitch_privmsg,
-        1800)
+        startgg_access_token, twitch_oauth_manager, twitch_chat, 1800)
 routine_schedule.routines.append(promo_routine)
 routine_schedule.routines.append(givebutter_thanking_routine)
 schedule_thread = threading.Thread(
@@ -431,15 +360,4 @@ for gs_id in givebutter_thanking_routine.processed_giving_space_ids:
 with open("processed_giving_space_ids.txt", "w") as giving_space_ids_file:
     giving_space_ids_file.write(processed_giving_space_ids_output_str)
 
-# Testing space
-venca_streams = twitch.get_streams(
-        twitch_access_token, twitch_client_id, user_logins=["vencabot"])
-vencabot = twitch.get_users(
-        twitch_access_token, twitch_client_id, logins=["vencabot"])[0]
-venca_schedule = twitch.get_channel_stream_schedule(
-        twitch_access_token, twitch_client_id, vencabot.user_id,
-        max_pages=2)
-
-print(venca_streams)
-print(vencabot.created_at.year)
-print(venca_schedule)
+# We should also save our new Twitch Refresh Token.
