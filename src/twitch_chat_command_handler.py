@@ -1,35 +1,21 @@
 import src.startgg as startgg
 
 from datetime import datetime
-from http.client import IncompleteRead, RemoteDisconnected
 from typing import Dict, List
-from urllib.error import URLError
 
 from src.irc_client import IRCClient
 from src.irc_client_listener import IRCClientPrivateMessageEvent
+from src.safe_web_api_call import safe_web_api_call
 from src.streambrain import Handler
 
 
-def safe_api_call(decorated: callable) -> callable:
-    def decorated_made_safe(*args, **kwargs) -> callable:
-        try:
-            return decorated(*args, **kwargs)
-        except (
-                IncompleteRead, RemoteDisconnected, TimeoutError,
-                URLError) as e:
-            if type(e) == URLError and e.errno != 10065:
-                raise
-            print(f"Non-critical: safe_api_call {e}: {e.message}. Passing.")
-    return decorated_made_safe
-
-
-@safe_api_call
+@safe_web_api_call
 def get_startgg_league_events(
         access_token: str, league_slug: str) -> List[Dict]:
     return startgg.get_league_events(access_token, league_slug)
 
 
-@safe_api_call
+@safe_web_api_call
 def get_startgg_league_standings(
         access_token: str, league_slug: str) -> List[Dict]:
     return startgg.get_league_standings(access_token, league_slug)
@@ -71,6 +57,8 @@ class TwitchChatCommandHandler(Handler):
             self.command_jazzypromoson(channel, sender)
         elif first_word == "!jazzystandings":
             self.command_jazzystandings(channel)
+        elif first_word == "!jazzygive":
+            self.command_jazzygive(channel)
 
     def command_jazzyevents(self, channel: str) -> None:
         events = get_startgg_league_events(
@@ -186,3 +174,10 @@ class TwitchChatCommandHandler(Handler):
                 top_players_str += ", and "
         top_players_str += " -- but only the TOP 5 players will compete in the Jazzy Finale! See more at start.gg/thejazzycircuit/standings ."
         self._irc_client.private_message(channel, top_players_str)
+
+    def command_jazzygive(self, channel: str) -> None:
+        self._irc_client.private_message(
+                channel,
+                "Enjoying Jazzy and want to help keep the lights on? We're "
+                "grateful for your support @ "
+                "https://givebutter.com/jazzy3s !")

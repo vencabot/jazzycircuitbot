@@ -14,6 +14,8 @@ import src.irc_client_listener as irc_client_listener
 from time import sleep
 from typing import Dict, List, Optional, Tuple
 
+from src.givebutter_handlers import GivebutterDonationHandler
+from src.givebutter_listeners import GivebutterListener
 from src.irc_client import IRCClient
 from src.irc_client_handlers import (
         ReportTimeoutHandler, LeaveIfNotModdedHandler, PongIfPingedHandler,
@@ -26,43 +28,6 @@ from src.twitch_chat_command_handler import TwitchChatCommandHandler
 CURRENT_CHANNELS_PATH = "current_channels.txt"
 EVENT_PROMO_OPTOUTS_PATH = "event_promo_optouts.txt"
 
-
-def safe_api_call(decorated: callable) -> callable:
-    def decorated_made_safe(*args, **kwargs) -> callable:
-        try:
-            return decorated(*args, **kwargs)
-        except http.client.IncompleteRead:
-            print("Non-critical: safe_api_call IncompleteRead. Passing.")
-        except http.client.RemoteDisconnected:
-            print(
-                    "Non-critical: safe_api_call RemoteDisconnected. "
-                    "Passing.")
-        except TimeoutError:
-            print("Non-critical: safe_api_call TimeoutError. Passing.")
-        except urllib.error.URLError as e:
-            if "10060" in e.reason:
-                print(
-                        "Non-critical: safe_api_call URLError "
-                        "[WinError 10060]. Passing.")
-            else:
-                raise
-        except urllib.error.HTTPError as e:
-            if e.code == 524:
-                print(
-                        "Non-critical: safe_api_call HTTPError code 524. "
-                        "Passing.")
-            else:
-                raise
-    return decorated_made_safe
-
-
-@safe_api_call
-def get_givebutter_transactions(
-        api_key: str) -> List[givebutter.Transaction]:
-    return givebutter.get_transactions(api_key)
-
-
-@safe_api_call
 def get_twitch_streams(
         twitch_oauth_manager: TwitchOauthManager, user_ids: List[int]=[],
         user_logins: List[str]=[], game_ids: List[int]=[],
@@ -89,7 +54,6 @@ def get_twitch_streams(
             already_failed = True
 
 
-@safe_api_call
 def get_startgg_league_events(
         access_token: str, league_slug: str) -> List[Dict]:
     return startgg.get_league_events(access_token, league_slug)
@@ -140,70 +104,6 @@ class Schedule:
 
     def stop(self):
         self._incrementing_forever = False
-
-
-class GivebutterThankingRoutine(Routine):
-    def __init__(
-            self, givebutter_api_key: str,
-            twitch_oauth_manager: TwitchOauthManager, irc_client: IRCClient,
-            processed_giving_space_ids: typing.List[int], interval_sec: int,
-            delay_sec: int=0) -> None:
-        self.givebutter_api_key = givebutter_api_key
-        self.twitch_oauth_manager = twitch_oauth_manager
-        self.irc_client = irc_client
-        self.processed_giving_space_ids = processed_giving_space_ids
-        super().__init__(interval_sec, delay_sec)
-
-    def run(self):
-        # diagnostic
-        print("Checking for new donations.")
-        new_donations = []
-        try:
-            gb_transactions = get_givebutter_transactions(
-                    self.givebutter_api_key)
-        except Exception as e:
-            # We might run into urllib.error.HTTPError or some OSError.
-            # I would like to narrow this down to the exact Exceptions that
-            # we'll be running into at some point.
-            # diagnostic
-            print("Exception while getting Givebutter transactions.")
-            print(e)
-            raise
-        for transaction in gb_transactions:
-            giving_space_id = transaction.giving_space.giving_space_id
-            if giving_space_id not in self.processed_giving_space_ids:
-                new_donations.append(transaction)
-        if not new_donations:
-            # diagnostic
-            print("No new donations.")
-            return
-        # diagnostic
-        print("Got new donations", new_donations)
-        print("Checking if Twitch streams are online.")
-        live_jazzybot_streams = get_twitch_streams(
-                self.twitch_oauth_manager,
-                user_logins=self.irc_client.channels)[0]
-        for transaction in new_donations:
-            giving_space_id = transaction.giving_space.giving_space_id
-            currency = transaction.currency
-            donor_name = transaction.giving_space.donor_name
-            amount = transaction.giving_space.amount
-            message = transaction.giving_space.message
-            chat_message = f"Thank you to {donor_name} for the "
-            if amount:
-                if currency == "USD":
-                    chat_message += f"${amount} "
-                else:
-                    chat_message += f"{amount} {currency} "
-            chat_message += (
-                    "donation to the Jazzy Givebutter @ "
-                    "givebutter.com/jazzy3s!")
-            if message:
-                chat_message += f" {donor_name} says: \"{message}\""
-            for stream in live_jazzybot_streams:
-                self.irc_client.private_message(
-                        stream.user_login, chat_message)
-            self.processed_giving_space_ids.append(giving_space_id)
 
 
 class JazzyEventPromoRoutine(Routine):
@@ -290,12 +190,19 @@ twitch_oauth_manager = TwitchOauthManager(
         twitch_client_id, twitch_client_secret, twitch_refresh_token)
 twitch_oauth_manager.refresh()
 
+# Givebutter stuff
+with open("processed_giving_space_ids.txt") as giving_space_ids_file:
+    giving_space_id_lines = giving_space_ids_file.readlines()
+processed_giving_space_ids = [int(x.strip()) for x in giving_space_id_lines]
+
 # Set up Twitch chat
 twitch_chat = IRCClient()
 twitch_chat.connect("irc.chat.twitch.tv")
 
 # Set up listeners
 twitch_chat_listener = irc_client_listener.IRCClientListener(twitch_chat)
+givebutter_listener = GivebutterListener(
+        givebutter_api_key, processed_giving_space_ids)
 
 # Set up handlers
 twitch_chat_command_handler = TwitchChatCommandHandler(
@@ -307,6 +214,8 @@ pong_if_pinged_handler = PongIfPingedHandler(twitch_chat)
 twitch_chat_login_failed_handler = TwitchChatLoginFailedHandler(
         twitch_chat, twitch_oauth_manager)
 report_timeout_handler = ReportTimeoutHandler()
+givebutter_donation_handler = GivebutterDonationHandler(
+        twitch_oauth_manager, twitch_chat, "processed_giving_space_ids.txt")
 
 # Create StreamBrain
 jazzycircuitbot_brain = StreamBrain()
@@ -315,6 +224,7 @@ jazzycircuitbot_brain.activate_handler(leave_if_not_modded_handler)
 jazzycircuitbot_brain.activate_handler(pong_if_pinged_handler)
 jazzycircuitbot_brain.activate_handler(twitch_chat_login_failed_handler)
 jazzycircuitbot_brain.activate_handler(report_timeout_handler)
+jazzycircuitbot_brain.activate_handler(givebutter_donation_handler)
 
 # Login to Twitch chat
 twitch_password = f"oauth:{twitch_oauth_manager.access_token}"
@@ -327,37 +237,18 @@ with open(CURRENT_CHANNELS_PATH) as current_channels_file:
 for raw_channel_line in raw_channel_lines:
     twitch_chat.join(raw_channel_line.strip())
 
-# Givebutter stuff
-with open("processed_giving_space_ids.txt") as giving_space_ids_file:
-    raw_giving_space_id_strs = giving_space_ids_file.readlines()
-processed_giving_space_ids = []
-for raw_giving_space_id_str in raw_giving_space_id_strs:
-    giving_space_id_str = raw_giving_space_id_str.strip()
-    if giving_space_id_str:
-        processed_giving_space_ids.append(int(giving_space_id_str))
-givebutter_thanking_routine = GivebutterThankingRoutine(
-        givebutter_api_key, twitch_oauth_manager, twitch_chat,
-        processed_giving_space_ids, 10)
-
 # Main loop
 jazzycircuitbot_brain.start_listening(twitch_chat_listener)
+jazzycircuitbot_brain.start_listening(givebutter_listener)
 routine_schedule = Schedule()
 promo_routine = JazzyEventPromoRoutine(
         startgg_access_token, twitch_oauth_manager, twitch_chat, 1800)
 routine_schedule.routines.append(promo_routine)
-routine_schedule.routines.append(givebutter_thanking_routine)
 schedule_thread = threading.Thread(
         target=routine_schedule.increment_loop, args=(1,))
 schedule_thread.start()
 input()
 jazzycircuitbot_brain.stop()
 routine_schedule.stop()
-
-# Save processed giving space IDs to an output file.
-processed_giving_space_ids_output_str = ""
-for gs_id in givebutter_thanking_routine.processed_giving_space_ids:
-    processed_giving_space_ids_output_str += f"{gs_id}\n"
-with open("processed_giving_space_ids.txt", "w") as giving_space_ids_file:
-    giving_space_ids_file.write(processed_giving_space_ids_output_str)
 
 # We should also save our new Twitch Refresh Token.

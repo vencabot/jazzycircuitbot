@@ -228,7 +228,8 @@ def get_channel_stream_schedule(
         access_token: str, client_id: str, broadcaster_id: int,
         segment_ids: List[str]=[], start_time: Optional[str]=None,
         page_size: Optional[int]=None, max_pages: Optional[int]=None,
-        after: Optional[str]=None) -> dict:
+        after: Optional[str]=None) \
+                -> Tuple[List[TwitchScheduleSegment], dict, str]:
     parameters = [("broadcaster_id", broadcaster_id)]
     for segment_id in segment_ids:
         parameters.append(("id", segment_id))
